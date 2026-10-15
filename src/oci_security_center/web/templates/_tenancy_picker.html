@@ -1,0 +1,8 @@
+<form class="inline" method="get">
+  <label>Tenancy
+    <select name="tenancy">
+      {% for t in tenancies %}<option value="{{ t.ocid }}" {% if t.ocid == tenancy.ocid %}selected{% endif %}>{{ t.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <button class="btn ghost">Show</button>
+</form>

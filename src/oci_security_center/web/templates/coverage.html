@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Coverage · OSC{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Collection coverage</h1>
+  <p class="muted">Collection tier {{ tier }}. Every dataset and scope OSC is expected to collect, with
+    its last complete collection. “Never collected”, stale, partial and failed scopes are gaps:
+    data shown for them elsewhere is incomplete.</p></div></div>
+<div class="tiles">
+  {% for state, n in totals %}<div class="tile"><span class="n">{{ n }}</span><span>{{ state | replace("_", " ") }}</span></div>{% endfor %}
+</div>
+<section class="card">
+  <table class="plain">
+    <thead><tr><th>Tenancy</th><th>Dataset</th><th>Scope</th><th>State</th><th>Last complete (UTC)</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr><td>{{ r.tenancy }}</td><td><code>{{ r.dataset }}</code></td><td>{{ r.scope }}</td>
+        <td><span class="pill {{ r.pill }}">{{ r.state | replace("_", " ") }}</span></td>
+        <td>{{ r.last_success.strftime("%Y-%m-%d %H:%M") if r.last_success else "never" }}</td>
+        <td class="why">{{ r.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>Recent scan runs</h2>
+  {% if runs %}
+  <table class="plain"><thead><tr><th>Run</th><th>Trigger</th><th>Started (UTC)</th><th>Status</th><th>Outcome counts</th></tr></thead><tbody>
+  {% for run in runs %}<tr><td><code>{{ run.run_id }}</code></td><td>{{ run.trigger }}</td><td>{{ run.started_at[:16] | replace("T", " ") }}</td>
+    <td><span class="pill {{ 'detected' if run.status == 'ok' else ('unknown' if run.status == 'running' else 'missing') }}">{{ run.status }}</span></td><td class="why">{{ run.summary }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">No scans have run yet. Start the scheduler (<code>osc scheduler</code>) or run <code>osc scan</code>.</p>{% endif %}
+</section>
+{% endblock %}

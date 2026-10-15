@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Findings · OSC{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Findings</h1>
+    <p class="muted">Control-plane coverage findings today; Cloud Guard, Security Zones, Advisor,
+      policy review and audit anomalies will appear here as those collectors are added.</p></div>
+  <nav class="tabs">
+    {% for s in ["open", "resolved", "all"] %}
+    <a href="/findings?status={{ s }}" class="{{ 'on' if status == s else '' }}">{{ s | capitalize }}</a>
+    {% endfor %}
+  </nav>
+</div>
+<section class="card">
+  {% if findings %}
+  <table class="plain">
+    <thead><tr><th>Severity</th><th>Tenancy</th><th>Finding</th><th>Rule</th><th>Last seen</th></tr></thead>
+    <tbody>
+    {% for f in findings %}
+      <tr><td><span class="sev {{ f.severity.value | lower }}">{{ f.severity.value }}</span></td>
+        <td>{{ names.get(f.tenancy_ocid, f.tenancy_ocid) }}</td>
+        <td><strong>{{ f.title }}</strong><div class="why">{{ f.description }}</div></td>
+        <td><code>{{ f.rule_id.split(":")[0] }}</code></td>
+        <td>{{ f.last_seen.strftime("%Y-%m-%d %H:%M UTC") }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">Nothing here.</p>{% endif %}
+</section>
+{% endblock %}

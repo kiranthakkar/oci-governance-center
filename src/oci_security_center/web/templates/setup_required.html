@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Setup required · OSC{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Setup required</h1>
+  <p>OSC has no parent tenancy yet. For safety the web UI stays closed until an operator
+    bootstraps it on the host:</p>
+  <pre>osc admin bootstrap --tenancy-ocid ocid1.tenancy.oc1..… \
+    --scan-method cli_profile --profile DEFAULT</pre>
+  <p class="muted">Run <code>osc admin bootstrap --help</code> for OIDC, API key and instance
+    principal options.</p>
+</section>
+{% endblock %}

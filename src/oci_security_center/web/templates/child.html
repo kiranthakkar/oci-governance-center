@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% from "_macros.html" import policy_block, onboarding_pill %}
+{% block title %}{{ child.name }} · Child configuration · OSC{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/admin/organization">Organization</a> / {{ child.name }}</p>
+<div class="page-head">
+  <div>
+    <h1>{{ child.name }} {{ onboarding_pill(child.onboarding_status) }}</h1>
+    <p class="meta"><code class="ocid">{{ child.ocid }}</code>
+      {% if child.lifecycle_state %} · {{ child.lifecycle_state }}{% endif %}
+      {% if child.governance_status %} · {{ child.governance_status }}{% endif %}</p>
+    {% if child.status_detail %}<p class="muted">{{ child.status_detail }}</p>{% endif %}
+  </div>
+  <div class="actions">
+    {% if child.onboarding_status == OnboardingStatus.DISCOVERED %}
+    <form method="post" action="/admin/children/{{ child.ocid }}/select">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="btn primary">Configure this child</button>
+    </form>
+    {% else %}
+    <form method="post" action="/admin/children/{{ child.ocid }}/verify">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="btn primary">Verify access</button>
+    </form>
+    {% if child.onboarding_status == OnboardingStatus.VERIFIED %}
+    <form method="post" action="/admin/children/{{ child.ocid }}/activate">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="btn">Include in scans</button>
+    </form>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+<section class="card">
+  <h2>Alias</h2>
+  <p class="muted">The name used for this child in the parent's <code>Define tenancy</code> and
+    <code>Endorse</code> statements.</p>
+  <form class="inline" method="post" action="/admin/children/{{ child.ocid }}/select">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Alias <input name="alias" value="{{ child.alias }}" pattern="[A-Za-z0-9_]+"></label>
+    <button class="btn ghost">Save alias</button>
+  </form>
+</section>
+
+<ol class="steps">
+  <li>
+    {{ policy_block(endorse, "Step 1 — Endorse, in the parent tenancy",
+       "Add these to the parent. They are also included in the combined osc-endorse-children policy on the Organization screen.",
+       "/admin/download?view=child-endorse&ocid=" ~ child.ocid, "the parent tenancy IAM admin") }}
+  </li>
+  <li>
+    {{ policy_block(admit, "Step 2 — Define and Admit, in the child tenancy",
+       "Send these to the child tenancy's IAM admin. OSC can't read the child's policies until they are applied, so their status is confirmed by Verify.",
+       "/admin/download?view=child-admit&ocid=" ~ child.ocid, "the child tenancy IAM admin") }}
+  </li>
+  <li>
+    <section class="card">
+      <h3>Step 3 — Verify</h3>
+      <p class="muted">Runs a read-only smoke test in the child as the scan identity.</p>
+      {% if verify %}
+      <table class="plain">
+        <tbody>
+        {% for s in verify.steps %}
+          <tr><td><span class="pill {{ 'detected' if s.ok else ('unknown' if not s.required else 'missing') }}">
+            {{ "OK" if s.ok else ("Warning" if not s.required else "Failed") }}</span></td>
+            <td>{{ s.name }}</td><td class="why">{{ s.detail }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">Not verified yet.</p>
+      {% endif %}
+    </section>
+  </li>
+</ol>
+{% endblock %}

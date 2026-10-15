@@ -1,0 +1,53 @@
+{% macro status_pill(status, detail="") -%}
+  {%- set labels = {"detected": "Detected", "broader": "Broader than needed",
+                    "missing": "Missing", "unknown": "Not confirmed"} -%}
+  <span class="pill {{ status.value if status.value else status }}" title="{{ detail }}">
+    {{ labels.get(status.value if status.value else status, status) }}</span>
+{%- endmacro %}
+
+{% macro onboarding_pill(status) -%}
+  <span class="pill ob-{{ status.value }}">{{ status.value | capitalize }}</span>
+{%- endmacro %}
+
+{% macro policy_block(view, title, subtitle, download_href, applied_by) %}
+{% set uid = view.policy_name ~ "-" ~ (view.tenancy_ocid[-10:]) ~ "-" ~ title | replace(" ", "") %}
+<section class="card policy">
+  <div class="policy-head">
+    <div>
+      <h3>{{ title }}</h3>
+      <p class="muted">{{ subtitle }}</p>
+      <p class="meta">Policy name <code>{{ view.policy_name }}</code> · root compartment of
+        <code class="ocid">{{ view.tenancy_ocid }}</code> · applied by {{ applied_by }}</p>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn" data-copy="stmts-{{ uid }}">Copy statements</button>
+      <a class="btn ghost" href="{{ download_href }}">Download .txt</a>
+    </div>
+  </div>
+  <table class="stmts">
+    <thead><tr><th>Status</th><th>Statement</th><th>Why OSC needs it</th></tr></thead>
+    <tbody>
+    {% for req in view.requirements %}
+      {% set chk = view.checks.get(req.id) %}
+      <tr class="{{ 'optional' if req.optional else '' }}">
+        <td>{{ status_pill(chk.status if chk else CheckStatus.UNKNOWN,
+                           chk.detail if chk else "Not checked yet") }}</td>
+        <td><code class="stmt">{{ req.statement }}</code>
+          {% if req.statement | placeholder %}<div class="hint warn">Fill in the placeholder — OSC
+            could not resolve this OCID yet (run “Re-check” on the Organization screen).</div>{% endif %}
+          {% if chk and chk.matched_statement and chk.status.value != "detected" %}
+            <div class="hint">Matched: <code>{{ chk.matched_statement }}</code></div>{% endif %}
+        </td>
+        <td class="why">{{ req.why }}{% if req.optional %} <em>(optional)</em>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <pre class="hidden" id="stmts-{{ uid }}">{{ view.text }}</pre>
+  <details class="cli">
+    <summary>OCI CLI command for the IAM admin</summary>
+    <pre id="cli-{{ uid }}">{{ view.cli }}</pre>
+    <button type="button" class="btn ghost" data-copy="cli-{{ uid }}">Copy command</button>
+  </details>
+</section>
+{% endmacro %}

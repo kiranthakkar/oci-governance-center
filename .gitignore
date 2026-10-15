@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+# OSC runtime data and secrets never belong in git
+.osc/
+*.db
+*.db-wal
+*.db-shm
+.secret_key
+*.pem
+.env
+
+# Local workstation files and additional secret formats
+.DS_Store
+*.key
+.env.*
+!.env.example

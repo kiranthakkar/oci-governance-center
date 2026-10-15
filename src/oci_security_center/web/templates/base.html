@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OCI Security Center{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>OCI Security Center</a>
+  {% if user %}
+  <nav>
+    <a href="/">Overview</a>
+    <a href="/findings">Findings</a>
+    <a href="/governance">Governance</a>
+    <a href="/access">Access</a>
+    <a href="/compartments">Compartments</a>
+    <a href="/activity">Activity</a>
+    <a href="/coverage">Coverage</a>
+    {% if is_admin %}
+    <a href="/admin/organization">Organization</a>
+    <a href="/admin/events">Admin log</a>
+    {% endif %}
+  </nav>
+  <div class="who">
+    <span>{{ user.name }} · {{ user.role }}</span>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="link">Sign out</button>
+    </form>
+  </div>
+  {% endif %}
+</header>
+<main>
+  {% for f in flashes %}
+  <div class="flash {{ f.level }}" role="status">{{ f.message }}</div>
+  {% endfor %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="foot">Read-only · OSC never changes your tenancies · {{ settings.deployment.value }} mode</footer>
+</body>
+</html>

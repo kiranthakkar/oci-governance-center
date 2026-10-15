@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Governance · OSC{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Governance</h1>
+  <p class="muted">Cloud Guard is the detector of record; OSC mirrors its open problems. “Unknown”
+    means the source has not been collected completely.</p></div></div>
+<section class="card">
+  <table class="plain">
+    <thead><tr><th>Tenancy</th><th>Cloud Guard</th><th>Reporting region</th><th>Open problems</th><th>Cloud Advisor</th><th>Pending recommendations</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr><td>{{ r.tenancy.name }}</td>
+        <td><span class="pill {{ 'detected' if r.cloud_guard == 'ENABLED' else ('unknown' if r.cloud_guard == 'unknown' else 'missing') }}">{{ r.cloud_guard }}</span></td>
+        <td>{{ r.reporting_region or "—" }}</td>
+        <td>{% for sev, n in r.problems.items() %}<span class="sev {{ sev | lower }}">{{ sev }} {{ n }}</span> {% else %}{{ "—" if r.cloud_guard == "ENABLED" else "n/a" }}{% endfor %}</td>
+        <td><span class="pill {{ 'detected' if r.advisor == 'enabled' else ('unknown' if r.advisor == 'unknown' else 'missing') }}">{{ r.advisor }}</span></td>
+        <td>{{ r.pending_recommendations if r.pending_recommendations is not none else "unknown" }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>Open governance findings</h2>
+  {% if findings %}
+  <table class="plain"><thead><tr><th>Severity</th><th>Tenancy</th><th>Source</th><th>Finding</th></tr></thead><tbody>
+  {% for f in findings %}<tr><td><span class="sev {{ f.severity.value | lower }}">{{ f.severity.value }}</span></td>
+    <td>{{ names.get(f.tenancy_ocid, f.tenancy_ocid) }}</td><td>{{ f.source.value | replace("_", " ") }}</td>
+    <td><strong>{{ f.title }}</strong><div class="why">{{ f.description }}</div></td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">No open findings from collected sources.</p>{% endif %}
+</section>
+{% endblock %}

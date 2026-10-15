@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Activity · OSC{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Control-plane activity</h1>
+  <p class="muted">Who did what in OSC. Kept {{ settings.control_plane_event_retention_days }} days.</p></div></div>
+<section class="card">
+  <table class="plain">
+    <thead><tr><th>When (UTC)</th><th>Actor</th><th>Action</th><th>Target</th><th>Result</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+      <tr><td>{{ e.at[:19] | replace("T", " ") }}</td><td>{{ e.actor }} <span class="muted">({{ e.role }})</span></td>
+        <td><code>{{ e.action }}</code></td><td><code class="ocid">{{ e.target or "" }}</code></td>
+        <td><span class="pill {{ 'detected' if e.result == 'ok' else 'missing' }}">{{ e.result }}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
