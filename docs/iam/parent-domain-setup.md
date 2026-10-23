@@ -1,5 +1,8 @@
 # Parent identity domain setup (for OCI IAM sign-in)
 
+> **Historical (2026-10-22).** This page describes the removed OSC implementation. The current
+> OGC grants and setup are in [OGC local scanner permissions](ogc-local-read.md) and AGENTS.md §6.
+
 OSC does **not** create any of this (it is read-only). A parent-tenancy identity-domain admin performs
 these steps once. Verify every step against current OCI documentation; names of menus and CLI
 flags change over time.

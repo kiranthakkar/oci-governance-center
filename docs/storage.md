@@ -1,5 +1,14 @@
 # Data Storage — Design
 
+> **2026-10-22:** This page contains historical design/implementation details.
+> New enrollment/scanner contracts are in [AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
+> current code and release gates are in [implementation status](implementation/status.md).
+
+**2026-10-15 update:** [Delegated tenancy scans](delegated-scans.md) supersedes older statements
+that children never have connections or that refreshable UPST grants cannot run scheduled scans.
+It defines encrypted grant storage, lifecycle, routing and live acceptance gates.
+
+
 Status: **Design v0.3** (2026-10-08) · Owner: Kiran Thakkar
 Related: `AGENTS.md` §3–§5, [control plane](control-plane.md),
 [audit recovery](delta-fetching.md), [architecture and implementation gates](architecture.md).
@@ -378,3 +387,7 @@ The MCP server is meant to **save OSC data into its storage**. To keep that safe
 | S9 | Order of future backends | Object Storage → ADB → MySQL → MCP sink (proposal) |
 
 Implementation failure-path fixes and regression coverage: [review summaries](review-fixes.md).
+
+Schema v4 adds `delegated_grants` (connection FK, generation, authorization ID, status, encrypted
+grant blob, update time). Refresh rotations are durable and serialized; restore clears blobs and
+requires reauthorization. See [delegated scan lifecycle](delegated-scans.md).

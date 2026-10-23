@@ -1,5 +1,14 @@
 # Data Collection — Design
 
+> **2026-10-22:** This page contains historical design/implementation details.
+> New enrollment/scanner contracts are in [AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
+> current code and release gates are in [implementation status](implementation/status.md).
+
+**2026-10-15 update:** [Delegated tenancy scans](delegated-scans.md) supersedes older statements
+that children never have connections or that refreshable UPST grants cannot run scheduled scans.
+It defines encrypted grant storage, lifecycle, routing and live acceptance gates.
+
+
 Status: **Design v0.2** (2026-10-08) · Owner: Kiran Thakkar
 Scope: what OSC reads from the parent tenancy and every child tenancy, organized in **tiers**, and the
 dashboards and findings each tier supports. Read with `AGENTS.md` §2 (security principles) and §6
@@ -230,7 +239,7 @@ report retry exhaustion. No dataset job may bypass maintenance or generation fen
 
 | ID | Question | Plan |
 |---|---|---|
-| Q1 | Identity-domain access from the scanner, including child domains | Required gate: prove Default and named-domain list-users/groups/dynamic-groups with the actual scanner method and Endorse/Admit. Confirm minimal field projection and principal OCID mapping. If unsupported, report identity scopes unsupported/partial; no per-child credentials or automatic tier downgrade. A new read path requires a separate design. |
+| Q1 | Identity-domain access from the scanner, including child domains | Required gate: prove Default and named-domain list-users/groups/dynamic-groups with a child-local delegated UPST (see `delegated-scans.md`). Cross-tenancy failures do not prove local-domain access. Confirm minimal field projection and principal OCID mapping. Report unsupported/partial scope without automatic tier downgrade or parent-identity fallback. |
 | Q2 | Log Search windows, paging, completeness, rate limits and audit event ID uniqueness | Required gate: record SDK/API version and sources, exhaust multi-page results, test dense/same-timestamp intervals and controlled retries. SDK documents a continuation page; numeric source limits must be verified rather than copied from Console UI. Apply delta-fetching.md before release. |
 | Q3 | Audit volume, late arrival and operational capacity | Required gate: measure representative peak events, bytes/day, backfill duration, late-event delay, writer latency, disk reserve, backup/restore time and summary cost. Configure resource caps; reject unsustainable deployments or report capacity gaps. |
 | Q4 | Parent Cloud Advisor organization-wide reads | Optional optimization gate. Keep per-tenancy reads as the baseline; only replace them after proving child attribution, equivalent completeness and source identity. |

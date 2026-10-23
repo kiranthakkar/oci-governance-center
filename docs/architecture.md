@@ -1,115 +1,100 @@
-# OCI Security Center — Architecture
+# OCI Governance Center — Architecture
 
-Status: Design baseline, 2026-10-08; implementation status updated 2026-10-09 (all contracts in §4
-implemented with mocked tests; live OCI evidence still required). Implementation status below is
-authoritative for this revision.
-Read with [AGENTS.md](../AGENTS.md), [control plane](control-plane.md),
-[collection](collection.md), [storage](storage.md), and [audit recovery](delta-fetching.md).
+Status: 2026-10-22, describing the new `oci_governance_center` implementation. Contracts are in
+[AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
+capabilities and live release gates are in [implementation status](implementation/status.md).
+[Collection](collection.md), [storage](storage.md), [control plane](control-plane.md) and
+[audit recovery](delta-fetching.md) contain historical OSC design input. Where they conflict with
+AGENTS.md or this page, AGENTS.md and this page win.
 
 ## 1. Boundaries and data flow
 
-OSC governs and observes one OCI Organization. All OCI resource access is read-only; local SQLite
-writes, authentication token exchange, and human-run policy commands are separate operations.
+OGC governs and observes one OCI Organization. All OCI resource access is read-only. Local SQLite
+writes, scanner token exchange and administrator-applied setup packages are separate operations.
 No collector or analyzer may apply a policy or modify an OCI resource.
 
 ```mermaid
 flowchart LR
-    User --> Web[FastAPI: sessions and authorization]
-    CLI --> CP[Control plane]
-    Web --> CP
-    CP --> Factory[Signer and client factories]
-    Scheduler[Scheduler: generation and scope leases] --> Collectors
-    Collectors --> Factory
-    Factory --> OCI[Read-only OCI APIs]
-    Collectors --> Stage[Normalized records and completeness evidence]
-    Stage --> Store[Scoped DataStore commits]
-    Store --> SQLite[osc.db and monthly audit databases]
-    SQLite --> Analysis[Policy and audit analyzers]
-    Analysis --> Findings[Findings with source-specific identities]
-    Findings --> Web
+    User --> Web[web/app.py: sessions, OIDC and authorization]
+    Web --> Queue[scans.py: durable job queue and schedule]
+    Web --> Service[service.py: enrollment and child lifecycle]
+    Scheduler[scheduler.py: separate worker process] --> Queue
+    Scheduler --> Service
+    Service --> Auth[auth/scanner.py: parent API key, child UPST]
+    Service --> Collectors[collectors/: field projections]
+    Collectors --> Clients[oci_clients: ReadOnlyClient allow-list]
+    Auth --> Clients
+    Clients --> OCI[Read-only OCI APIs]
+    Collectors --> Store[storage.py: scoped, fenced publication]
+    Store --> SQLite[ogc.db and per-generation monthly Audit DBs]
+    Store --> Analysis[analyzers.py: governance rules]
+    Analysis --> Store
+    SQLite --> Web
 ```
 
-Tier 1 collectors, the scan runner, the audit ingestion coordinator and the scheduler are
-implemented (`collection/`, `collectors/`); Tier 2–5 collectors and analyzers, including anomaly
-rules, are not yet built. The scheduler runs as its own process (`osc scheduler`, plus one-shot
-`osc scan`), not inside the web server; the web UI only reads data (decision 2026-10-09). The diagram is the required design, not a statement
-that every component exists. OCI clients are created per worker; analyzers use only
-stored data. A bounded pool limits active work, with per-scope leases preventing overlapping runs.
+Collection runs only in the separate `ogc scheduler` process (or one-shot `ogc scan`). The web
+process queues work and reads stored data; it never performs collection in a request. Each tenancy
+scan constructs its own clients and signer. A bounded thread pool (`OGC_MAX_WORKERS`) limits
+concurrent tenancies, and an expiring per-tenancy lease prevents overlapping runs. Analyzers use
+only stored, complete batches.
 
 ## 2. Authorization and coverage
 
-The parent has separate interactive admin and non-interactive scan connections. Children have no
-credentials. The scan identity reaches children through paired Endorse/Admit policies. Admin routes
-require OSC-Admins; viewers can read findings, policy review, audit views and exports. All sensitive
-reads and local changes are authorized server-side. CLI operations require trusted host access.
+Human login is OAuth Code + PKCE against the parent default domain. Group membership comes from
+Asserter, and only the parent's `ogc_admin` and `ogc_viewer` group IDs grant access. Membership is
+rechecked at least every five minutes and before every configuration change. The scanner is
+independent of login: the parent uses its API key directly, and children use API key → parent JWT →
+child UPST (AGENTS.md §6.6). Admin routes require `ogc_admin`. Viewers can read dashboards,
+coverage, findings, activity and exports. All checks are enforced server-side.
 
-Access-policy checks establish configured grants; smoke tests establish access to the specific APIs
-and regions tested. Neither is proof of complete inventory. Every dashboard must show collection tier,
-last successful collection, scope, and any unsupported, stale, failed or partial coverage. Unknown is
-never rendered as healthy or empty. Tier 1 displays observed IAM policy grants and group membership;
-identity-domain administrator grants are included only from Tier 4. OSC does not promise a complete
-OCI effective-permissions evaluator (conditions, resource policies and service-specific authorization).
+Every collected dataset is published under an explicit `Scope` (tenancy, dataset, region, domain,
+compartment). A failed scope raises `OGC-ACCESS-002` and keeps the previous snapshot. Unknown is
+never rendered as healthy or empty. Tier 1 shows observed IAM policy statements and group
+membership; identity-domain admin-role grants arrive at Tier 4. OGC makes no complete
+effective-permissions claim.
 
 ## 3. Read-only enforcement contract
 
-The existing AST test is a deny-list and is only a supplementary guard. Before production release,
-enforce an explicit SDK operation allow-list at the client boundary and test the static call surface:
+- Only reviewed `get_*`, `list_*`, `summarize_*` and `search_*` SDK operations are permitted.
+- SDK construction happens only in `oci_clients/__init__.py`. The OCI request signer and
+  `SecurityTokenSigner` are constructed only in `auth/scanner.py`.
+- Every client is wrapped in `ReadOnlyClient`, which exposes only its kind's operations from
+  `OPERATIONS`. It hides the wrapped client and `base_client` and rejects attribute assignment.
+- Raw HTTP is limited to `auth/scanner.py` (`requests`: domain token endpoint, `SigningCert/jwk`,
+  OpenID discovery) and `auth/oidc.py` (`httpx`/Authlib: discovery, token, JWKS, Asserter).
+  Redirects are disabled and endpoints are constrained to the saved identity-domain origin.
 
-- Inventory every SDK operation used by collectors and control-plane services; only reviewed
-  `get_*`, `list_*`, `summarize_*`, and `search_*` operations are permitted.
-- SDK constructors, pagination helpers and signer token exchange are infrastructure operations,
-  separately reviewed; authentication may issue credentials but may not mutate tenancy resources.
-- Wrap SDK clients so operation attributes are checked before invocation. Reject unknown operations,
-  dynamic method lookup, and indirect aliases unless they go through this same boundary. Static
-  checks must identify SDK receivers; local storage method exemptions are receiver-specific.
-- Raw HTTP access is limited to reviewed OIDC discovery, JWKS, userinfo and token endpoints.
-  No raw HTTP resource API calls, SDK bypasses, or arbitrary base-client operations are allowed.
-- Test an allowed read, an unfamiliar mutating verb, a method alias, `getattr`, a colliding local-method
-  name and an attempted raw HTTP bypass. The test suite makes no live OCI calls.
+Enforcement: `tests/unit/test_sdk_boundary.py` statically checks the construction and HTTP sites
+and requires the referenced operation names to equal the allow-list exactly. Receiver-specific
+exemptions exist for local methods. `tests/unit/test_auth_and_boundary.py` exercises aliases,
+`getattr`, wrapped-client access and real SDK construction without network access.
 
-Production release requires this enforcement; passing the current deny-list test alone is insufficient.
+## 4. Required design versus current implementation
 
-Implementation (2026-10-09): `oci_clients/allowlist.py` lists reviewed read operations per SDK client
-class; `ClientFactory` refuses unlisted client classes before constructing them and wraps every client
-in `ReadOnlyClient`, which exposes only those operations (no other attributes, no assignment).
-`tests/unit/test_sdk_boundary.py` checks `src/` statically (SDK operation names against the allow-list
-with file+receiver exemptions for colliding local methods; SDK construction only in the client and
-signer factories; no `base_client`/`call_api`/wrapped-client internals or `__dict__` dispatch; dynamic
-`getattr` only at reviewed sites; raw HTTP only for OIDC token refresh and userinfo; OIDC discovery,
-token and JWKS calls only through authlib in `web/app.py`) and exercises each required bypass shape.
-The allow-list must equal the operations actually used. Signer construction (instance principal,
-token exchange) remains reviewed infrastructure in `auth/signers.py`.
+Do not mark a criterion complete based on documentation or mocked tests when it requires OCI
+evidence. Live gates are listed in [implementation status](implementation/status.md).
 
-## 4. Review closure and acceptance criteria
-
-The design decisions below close the 2026-10-08 review. Runtime changes are still required where shown;
-this documentation revision does not certify that those changes or live POCs have been completed.
-
-| Gap | Required contract | Current implementation / release acceptance |
+| Area | Required contract | Current implementation |
 |---|---|---|
-| Policy alias leakage | Control plane §5.3: definitions scoped to one policy | Implemented: `DefineTable` per policy document, conflicting definitions → unknown; tests cover split definitions, conflicts, alias reuse across policies and complete same-policy blocks. |
-| Finding collisions | Storage §3.4: versioned source-specific identity | Schema v2 implements identity v1 (structured, per-source components, Cloud Guard/Security Zone shared namespace), scoped resolution, reopen and `resolved_at`; v0.1 rows migrate or are quarantined. Collector-emitted identities arrive with their collectors. |
-| Snapshot scope | Storage §4.1: declared scope and complete manifest | Schema v2 implements registry-declared scopes, complete-manifest publication, scope-only removal, out-of-scope/duplicate rejection, lease and generation fencing and delayed-run rejection, with mocked tests. Collectors producing manifests are the next slices. |
-| Audit durability | Delta-fetching §§2–4: durable events before checkpoint | Implemented: `collection/audit.py` + `commit_interval` (ledger, checkpoint, scan item in one durable fenced transaction after durable event batches); forward/backfill/reconcile cursors, split-until-proven, gaps, lost-file rebuild. Mocked tests cover crash between event and checkpoint commits, late events, month boundaries, gaps, paging and fencing. Source limits remain gate Q2. |
-| Cross-tenancy capability | Collection §10 and control plane §2.6 | Capability status per (tenancy, dataset, scope) is recorded by every collection (`capabilities` table) and reset on scan-principal change; unshared audit regions are coverage gaps. Domain auth/member paging and regional behaviour still need authorized sandbox evidence (Q1, Q5). |
-| Vault bootstrap / signer compatibility | Control plane §3.1: no credential dependency cycle; §2.3: supported signer/deployment pairs | Implemented: `auth/policy.py` (one rule set for CLI, web and signers); `oci` mode rejects CLI-profile and API-key connections; Vault-backed API-key scan and Vault refs without a keyless scan identity are rejected in preflight before anything is stored or replaced. |
-| Organization switch | Control plane §6.1: exclusive lease and generation fencing | Implemented: full preflight, drain with timeout, `switch_journal` (prepared → committed → active → cleaned), quarantine-then-activate, startup/`osc admin recover` recovery, generation-fenced control-plane and web writes, session generation, 503 for writes during maintenance. |
-| Backup and restore | Storage §6.1: complete manifest and recovery | Implemented: `osc db backup|restore` (`storage/sqlite/backup.py`) with manifest, checksums, key verification, atomic publish, expiry, offline staged restore to a new generation, audit reconciliation and main-DB-only partial restore. Restore drills on real deployments remain an operational requirement. |
-| Short-window anomalies | Collection §7: indexed event candidates and exact timestamps | Not started (Tier 5). Audit events are collected and stored per the contract; candidate indexes and analyzers come with Tier 5. |
-| SDK enforcement | Architecture §3 | Implemented: per-client read allow-list, `ReadOnlyClient` runtime wrapper, static boundary and bypass tests (mocked; no live calls). New operations go through the allow-list review. |
+| SDK enforcement | §3 | Implemented: per-kind allow-list, `ReadOnlyClient`, static and runtime bypass tests (mocked). |
+| Scoped snapshots | Complete same-scope replacement; failures preserve data | Implemented in `Store.publish`: complete batches replace their scope and record diffs in `changes`; incomplete batches keep prior records and raise `OGC-ACCESS-002`. Fenced by generation, pending cleanup, scanner suspension, child revision/pause/departure and lease. Duplicate keys within one batch fail the transaction rather than being rejected explicitly. |
+| Finding identity and lifecycle | Source-specific versioned identity; scoped resolution; `resolved_at` | Implemented: governance IDs hash `["v1", tenancy, dataset, record key, rule]`; coverage IDs hash `coverage-v1:` + scope. `first_seen` is retained; resolution requires a complete batch for the same scope. Every writer builds a `models.Finding` (source, severity and status limited to AGENTS.md §5 values), and `Store.rows("findings")` revalidates stored rows, so a malformed row fails loudly rather than rendering. |
+| Audit durability | Events durable before checkpoint; gap-aware | Partial: `Store.audit_commit` writes event files, then the receipt and checkpoint, inside one fenced transaction. Three cursors per region: forward catches up to the present each scan (15-minute overlap); reconciliation re-reads the 24 hours before the previous forward checkpoint; backfill reads up to `OGC_AUDIT_BACKFILL_HOURS` per scan toward a fixed target where forward collection began. Not implemented: explicit gap ledger, split-until-proven, lost-file rebuild and replay older than 24 hours. |
+| Organization replacement | Fenced, recoverable switch and cleanup (AGENTS.md §6.8) | Implemented: `Store.install` atomically clears organization tables, advances the generation and records pending cleanup. Cleanup of old Audit, backup and export directories retries on startup, and all writes are fenced until it finishes. Same-parent key repair advances the generation and interrupts running jobs. No separate drain or maintenance mode. |
+| Scan control | AGENTS.md §6.9, [scanning](scanning.md) | Implemented: durable queue, coalescing, daily/weekly schedule with DST rules, heartbeat, renewable job leases, interrupted-run recovery. |
+| Child trust (WIF) | AGENTS.md §6.5–6.6 | Implemented with mocks: per-worker exchange, identity rebinding on renewal, revision fencing. Live caller authorization is release gate 1. |
+| Storage migrations | Explicit versioned migrations | Not implemented: the schema is created with `CREATE TABLE IF NOT EXISTS` only (see §5). |
+| Backup and restore | Complete manifest and recovery | Not implemented. Replacement removes the managed backup/export directories. |
+| Tier 2 guardrails | collection §4 | Not implemented. |
+| Tier 4 policy analysis | Policy-local aliases, parser, risky-grant rules | Not implemented; raw statements are collected in `identity.policies`. |
+| Tier 5 anomalies | collection §7 | Not implemented; Audit events are stored for later use. |
 
-Do not mark an acceptance criterion complete based on documentation or mocked tests when it requires
-OCI evidence. Store only synthetic fixtures; do not record real credentials or token claims.
+## 5. Document ownership
 
-The subsequent implementation review found six local failure-path defects. Their fixes and
-regression coverage are summarized in [Implementation review fixes](review-fixes.md).
-
-## 5. Document ownership and implementation status
-
-- [IAM catalog](iam/README.md) owns permission intent and validation status; policy rendering is in
-  `control_plane/policy_templates.py`. Do not add a second independent renderer.
-- [Detection catalog](detections/README.md) lists existing and planned rules and their specifications.
-- Storage schema versions require explicit migrations, backed-up inputs and rollback/recovery guidance.
-  `CREATE TABLE IF NOT EXISTS` is not a migration mechanism for changing an existing schema.
+- [IAM catalog](iam/README.md) owns permission intent. Rendering lives only in
+  `provisioning/bundle.py`; do not add a second renderer.
+- [Detection catalog](detections/README.md) lists implemented and planned rules and their specs.
+- Changing an existing table requires an explicit migration with backup and recovery guidance.
+  `CREATE TABLE IF NOT EXISTS` is not a migration mechanism.
 - No live OCI test, CLI command or scan is authorized by this document. Sandbox evidence needs the
   user's explicit session authorization and a named tenancy/profile.

@@ -1,39 +1,38 @@
 # IAM requirements and templates
 
-Status: Design baseline, 2026-10-08. This catalog owns permission intent; executable rendering lives
-in `src/oci_security_center/control_plane/policy_templates.py`. Keep renderer, catalog and tests in
-one change. Templates contain placeholders and are displayed for humans; OSC never applies them.
+Status: 2026-10-22. This catalog owns permission intent. The current scanner grants are in
+[OGC local scanner permissions](ogc-local-read.md); the parent/child Terraform bundles and manual
+guides render them from `src/oci_governance_center/provisioning/bundle.py`. Keep the catalog,
+renderer and `tests/unit/test_provisioning.py` in one change. OGC never applies these policies.
 
-| Template | Purpose | Apply in |
-|---|---|---|
-| [Parent access](parent-access.md) | Admin reads and scanner access | Parent root |
-| [Cross-tenancy](cross-tenancy.md) | Complete Endorse and Define/Admit blocks | Parent and child roots respectively |
-| [Single tenancy](single-tenancy.md) | Parent-only deployment; no cross-tenancy grant | Registered tenancy root |
-| [Identity-domain setup](parent-domain-setup.md) | OIDC groups, app and validated token-exchange trust | Parent identity domain, manually |
+| Template | Status | Purpose | Apply in |
+|---|---|---|---|
+| [OGC local read](ogc-local-read.md) | **Current** | Local `ogc_scanner` read grants and default-domain WIF prerequisites | Parent and each child root |
+| [Parent access](parent-access.md) | Historical (OSC) | Admin reads and scanner access | — |
+| [Cross-tenancy](cross-tenancy.md) | Historical (OSC) | Endorse and Define/Admit blocks; not an OGC access mechanism | — |
+| [Single tenancy](single-tenancy.md) | Historical (OSC) | Parent-only deployment | — |
+| [Identity-domain setup](parent-domain-setup.md) | Historical (OSC) | OSC groups, OIDC app and token-exchange trust | — |
+| [Delegated scan](delegated-scan.md) | Historical (OSC) | Child-local delegated UPST prerequisites | — |
+
+Historical pages describe the removed OSC implementation. Where they conflict with AGENTS.md
+sections 6–7 or `ogc-local-read.md`, the current pages win.
 
 ## Validation status and constraints
 
 `organizations-family` is an official resource family. Oracle maps ListOrganizations to
 ORGANIZATIONS_ENTITY_INSPECT and ListOrganizationTenancies to ORGANIZATIONS_TENANCY_INSPECT; the
-existing `read organizations-family` template includes those inspect permissions. This documentation
-verification does not replace a scanner-method-specific sandbox connection test.
+parent's `read organizations-family` grant includes those inspect permissions. Documentation checks
+do not replace a live connection test.
 [Oracle Organization Management reference](https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/organizationsreference.htm)
 
-Cross-tenancy examples require complete policy-local definitions and matching region subscriptions.
-[Oracle cross-tenancy reference](https://docs.oracle.com/en-us/iaas/Content/Identity/policieshow/iam-cross-domain.htm)
-Domain API authorization/member paging, Logging Search limits and Container Instance matching rules
-remain capability gates in collection §10 and control-plane §2.6. Never broaden grants automatically
-when a capability fails. Viewers need no OCI permissions. No write verb is required by OSC.
+The scanner uses per-family local read grants, not `read all-resources`. Each grant maps to reviewed
+SDK operations in `oci_clients.OPERATIONS`; a new operation needs an allow-list entry, a grant here
+and in `provisioning/bundle.py`, and tests in the same change. Grants are local to each tenancy.
+Parent group membership grants no child access, and Endorse/Admit is not an OGC access mechanism.
 
-The MVP's `read all-resources` is deliberately broad; it is not proof of least privilege or that every
-service supports cross-tenancy reads. It increases the compromised-scanner blast radius beyond the
-fields OSC retains. Collector field allow-lists do not restrict an attacker's stolen credentials.
-Show this scope to IAM admins and constrain scanner host access; per-family grants remain D7.
-
-Vault secret retrieval follows control-plane §3.1; API-key-only scan identities cannot retrieve their
-own key. Do not add a standalone Vault permission or independent retrieval identity without a reviewed
-design and same-change template update. Encryption-key injection is an operator deployment concern.
-
-Optional administrator child browsing stays disabled until D2 has evidence. When splitting a combined
-Endorse policy to meet the verified statement limit, repeat required definitions in every resulting
-policy document; aliases are not global. Validate actual principal/domain identity before rendering.
+All-domain user/group/membership reads, SCIM member limits, regional behaviour and the API key →
+parent JWT → child UPST caller authorization remain live release gates
+([implementation status](../implementation/status.md)). Never broaden grants automatically when a
+capability fails; report the denied scope as coverage. Viewers need no OCI permissions, and OGC
+requires no write verb. Collector field projections do not limit what stolen scanner credentials
+could read, so restrict scanner host access.

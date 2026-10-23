@@ -1,5 +1,8 @@
 # Parent access template
 
+> **Historical (2026-10-22).** This page describes the removed OSC implementation. The current
+> OGC grants and setup are in [OGC local scanner permissions](ogc-local-read.md) and AGENTS.md §6.
+
 Status: Existing MVP statement set; capability/production gates are in [the catalog](README.md).
 Root policy name: `osc-parent-access`. Resolve names/OCIDs using read-only parent lookups. For a
 named identity domain use `group '<DomainName>'/'<GroupName>'` (and the validated dynamic-group

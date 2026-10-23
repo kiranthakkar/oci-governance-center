@@ -1,6 +1,9 @@
+> **Not implemented (2026-10-22).** The OSC statement parser was removed with that implementation.
+> OGC collects raw policy statements only; parsing arrives with Tier 4 policy analysis.
+
 # POLICY-PARSE-001 — Policy analysis incomplete
 
-Version: proposed 1 (2026-10-08). Status: finding planned; tolerant parser exists.
+Version: proposed 1 (2026-10-08). Status: planned (Tier 4).
 Source: policy. Severity: LOW. No CIS mapping.
 
 Inputs: policy OCID, attachment compartment, statement text, canonical statement identity and parser

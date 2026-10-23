@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block content %}
+<p class="eyebrow">Scanner diagnostics</p><h1>Scan details</h1>
+<p><a href="/scans">Back to scans</a></p>
+<section class="card"><h2><span class="badge {{ 'partial' if job.status in ['partial','failed','interrupted'] else job.status }}">{{ job.status | capitalize }}</span></h2>
+<p>Scan <code>{{ job.id }}</code> · {{ job.source | capitalize }} · Organization-wide</p>
+<p>Requested: {{ job.requested_at }} UTC<br>Started: {{ job.started_at or 'Not started' }}<br>Finished: {{ job.finished_at or 'Not finished' }}</p>
+{% if job.error %}<aside class="warning">{{ job.error }}</aside>{% endif %}
+<p class="muted">Finished means execution ended. Partial means collection ended with coverage gaps. These are scanner findings, not proof that the affected resources have a security violation.</p></section>
+{% if live %}<aside class="warning">Live coverage, shared by the organization. Refresh for updates; these results are not yet a completed scan snapshot.</aside>{% elif not rows %}<aside class="warning">No scope snapshot was recorded. Older scans and interrupted runs may not have one. <a href="/data/coverage">View current coverage</a>.</aside>{% endif %}
+{% if rows %}
+<section class="card"><h2>{{ incomplete }} incomplete collection scopes</h2><p>Incomplete scopes appear first. A scope marked “Earlier attempt” was not retried during this run; its last recorded result still contributes to coverage.</p>
+<div class="table-wrap"><table><thead><tr><th>Tenancy / dataset</th><th>Domain / region</th><th>Status</th><th>Attempt / last success (UTC)</th><th>Diagnostic</th></tr></thead><tbody>
+{% for row in rows %}<tr><td><strong>{{ names.get(row.scope.tenancy, row.scope.tenancy) }}</strong><small>{{ row.scope.tenancy }}</small>{{ row.scope.dataset }}</td><td>{{ row.scope.domain or 'Tenancy-wide' }}<small>{{ row.scope.region }}{% if row.scope.compartment %} · {{ row.scope.compartment }}{% endif %}</small></td><td><span class="badge {{ 'partial' if row.status != 'complete' else 'complete' }}">{{ 'Incomplete coverage' if row.status != 'complete' else 'Complete' }}</span><small>{{ 'Attempted during this scan' if row.attempted_in_run else 'Earlier attempt' }}</small></td><td>{{ row.attempted }}<br>{{ row.succeeded or 'Never collected' }}</td><td>{{ row.error or 'Collection completed' }}{% if row.status != 'complete' %}<small>Flagged as OGC-ACCESS-002</small><a href="/data/findings?source=coverage&amp;status=open&amp;tenancy={{ row.scope.tenancy | urlencode }}">Current coverage findings</a>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div></section>
+{% endif %}
+<p class="muted">This page shows recorded collection diagnostics. Raw process logs, troubleshooting payloads, bearer tokens, and client secrets are not served by this page. Completed scan snapshots remain unchanged when a later scan succeeds.</p>
+{% endblock %}

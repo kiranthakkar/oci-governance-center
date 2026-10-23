@@ -1,5 +1,8 @@
 # Cross-tenancy templates
 
+> **Historical (2026-10-22).** This page describes the removed OSC implementation. The current
+> OGC grants and setup are in [OGC local scanner permissions](ogc-local-read.md) and AGENTS.md §6.
+
 Status: Existing MVP statement shape; [capability gates](../collection.md#10-capability-release-gates)
 remain required. Replace every placeholder with verified tenancy/group identities. Use the scanner
 principal from [parent access](parent-access.md). Default names below are editable aliases.

@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block content %}
+<p class="eyebrow">Organization collection</p>
+<h1>Scan</h1>
+<p class="intro">Collect the parent tenancy and all configured children, including IAM inventory, governance findings, and Audit activity. Paused, departed, and unconfigured children are excluded.</p>
+{% if message %}<aside class="warning" role="{{ 'alert' if failed else 'status' }}">{{ message }}</aside>{% endif %}
+{% if not worker_online %}<aside class="warning"><strong>Scanner offline.</strong> Requests will stay queued until the scanner is running. Ask the operator to start the scanner process.</aside>{% endif %}
+<div class="grid two">
+<section class="card">
+<p class="eyebrow">On demand</p><h2>Start a scan</h2>
+{% if active_job %}<p><span class="badge {{ active_job.status }}">{{ active_job.status | capitalize }}</span> Requested {{ active_job.requested_at }} UTC.</p><p>Refresh this page to see progress. Repeated requests use the existing scan.</p>{% else %}<p>Run a full scan without changing the recurring schedule.</p>{% endif %}
+{% if admin %}<form method="post" action="/scans/start"><input type="hidden" name="csrf" value="{{ csrf }}"><button {% if active_job or blocked %}disabled{% endif %}>Start scan now</button></form>{% else %}<p class="muted">An ogc_admin can start scans and manage the schedule.</p>{% endif %}
+</section>
+<section class="card">
+<p class="eyebrow">Recurring scans</p><h2>{% if schedule %}{{ schedule.frequency | capitalize }} schedule{% else %}No schedule configured{% endif %}</h2>
+{% if schedule %}<p>{{ schedule.time_of_day }} · {{ schedule.timezone }}{% if schedule.frequency == 'weekly' %} · {{ weekdays[schedule.weekday] }}{% endif %}</p><p><strong>Next run:</strong> {{ next_run }}</p>{% else %}<p>Choose daily or weekly scanning below. Recurring scans are disabled until a schedule is saved.</p>{% endif %}
+<p class="muted">One schedule applies to the organization. Missed runs are combined into one scan when the scanner returns. Overlapping scan requests are combined.</p>
+{% if admin and schedule %}<form method="post" action="/scans/schedule/disable"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Disable schedule</button></form>{% endif %}
+</section>
+</div>
+{% if admin %}
+<section class="card"><h2>Configure schedule</h2>
+<form method="post" action="/scans/schedule">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<div class="grid two">
+<label>Frequency<select name="frequency" required><option value="daily" {% if draft.frequency == 'daily' %}selected{% endif %}>Daily</option><option value="weekly" {% if draft.frequency == 'weekly' %}selected{% endif %}>Weekly</option></select></label>
+<label>Time of day<input type="time" name="time_of_day" value="{{ draft.time_of_day }}" required></label>
+<label>Day of week <small>Used only for weekly scans</small><select name="weekday">{% for day in weekdays %}<option value="{{ loop.index0 }}" {% if draft.weekday | string == loop.index0 | string %}selected{% endif %}>{{ day }}</option>{% endfor %}</select></label>
+<label>Timezone<input name="timezone" value="{{ draft.timezone }}" list="scan-timezones" required><small>Use an IANA timezone; all scan history timestamps below are UTC.</small></label>
+</div>
+<datalist id="scan-timezones"><option value="UTC"><option value="America/Los_Angeles"><option value="America/New_York"><option value="Europe/London"><option value="Europe/Paris"><option value="Asia/Kolkata"><option value="Asia/Singapore"><option value="Australia/Sydney"></datalist>
+<p class="muted">During daylight saving changes, a skipped time runs at the next valid local minute. A repeated time runs once.</p>
+<button>Save schedule</button></form></section>
+{% endif %}
+<section class="card"><div class="title-row"><h2>Scan history</h2><a href="/scans">Refresh</a></div>
+{% if jobs %}<div class="table-wrap"><table><thead><tr><th>Requested (UTC)</th><th>Trigger</th><th>Status</th><th>Started / finished (UTC)</th><th>Result</th></tr></thead><tbody>{% for job in jobs %}<tr><td>{{ job.requested_at }}</td><td>{{ job.source | capitalize }}</td><td><span class="badge {{ job.status }}">{{ job.status | capitalize }}</span></td><td>{{ job.started_at or '—' }}<br>{{ job.finished_at or '—' }}</td><td>{{ job.error or ('Scanning…' if job.status == 'running' else 'Waiting for scanner' if job.status == 'queued' else 'Completed all accessible collection scopes') }}<br><a href="/scans/{{ job.id }}">View scan details</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="muted">No scans have been requested yet.</p>{% endif %}
+<p class="muted">Each scan covers the organization. Partial means work finished with coverage gaps; counts include unresolved scopes from earlier attempts.</p><p><a href="/data/coverage?status=failed">View incomplete scopes</a> · <a href="/data/findings?source=coverage&amp;status=open">View coverage findings</a></p><p><a href="/data/coverage">View collection coverage</a> · <a href="/data/findings">View findings</a></p>
+</section>
+{% endblock %}

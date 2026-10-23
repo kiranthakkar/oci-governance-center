@@ -1,9 +1,19 @@
 # ADV-RECOMMENDATION — Cloud Advisor recommendation (mirrored)
 
-Version: 1 (2026-10-09). Status: implemented (Tier 1). Source: advisor. Severity: one step below the
-source importance (`models/severity.py`: CRITICAL→HIGH, HIGH→MEDIUM, MODERATE→LOW, LOW/MINOR→INFO);
-recommendations are advisory. No CIS mapping.
+Version: 1 (2026-10-22). Status: implemented (Tier 1). Source: advisor. No CIS mapping.
+Code: `collectors/inventory.py`, `analyzers.governance`.
 
-Input: `optimizer.recommendations` — `list_categories`, then `list_recommendations` per category
-(whole subtree, home region). Trigger: status `PENDING`. Identity: recommendation OCID. Resolution:
-absent or no longer pending in a later complete snapshot. Tests: `tests/unit/test_collectors.py`.
+Input: dataset `optimizer.recommendations`, read with `OptimizerClient.list_recommendations` for the
+tenancy subtree in the home region and projected to `id`, `category_id`, `name`, `importance`,
+`status` and `time_updated`.
+
+Trigger: status `PENDING` in a complete snapshot. Title: the recommendation name. Severity
+(`severity.advisor_severity`) is one step below the source importance because recommendations are
+advisory: `CRITICAL`→`HIGH`, `HIGH`→`MEDIUM`, `MODERATE`/`MEDIUM`→`LOW`, `LOW`→`INFO`; any other
+value becomes `INFO`.
+
+Identity: SHA-256 of `["v1", tenancy, "optimizer.recommendations", <recommendation OCID>,
+"ADV-RECOMMENDATION"]`. Resolution: absent or no longer pending in a later complete snapshot of the
+same scope. A failed read raises `OGC-ACCESS-002` and keeps findings open.
+
+Tests: `tests/unit/test_jwt_and_analysis.py::test_positive_and_negative_governance_rules`.

@@ -1,122 +1,189 @@
-# OCI Security Center (OSC)
+# OCI Governance Center
 
-Read-only governance and observability tool for an **OCI Organization**: the parent tenancy and every child
-tenancy. Design docs: [`AGENTS.md`](AGENTS.md), [`docs/control-plane.md`](docs/control-plane.md),
-[`docs/storage.md`](docs/storage.md), [`docs/collection.md`](docs/collection.md),
-[`docs/architecture.md`](docs/architecture.md), [`docs/delta-fetching.md`](docs/delta-fetching.md).
+Read-only governance and observability for one OCI parent organization and its child tenancies.
 
-**Status (v0.1):** control plane is in place: parent connection (OIDC + token exchange, OCI CLI
-profile, API key, instance/resource principal), Organization discovery, the Organization and Child
-configuration screens with required policies and read-only status checks, Verify, SQLite storage
-with 90-day data retention and 365-day control-plane audit retention. Pillars 2–4 (Cloud Guard / Security Zones / Advisor, policy review, audit
-anomalies) are next. This is a POC implementation; the production gates in
-[architecture §4](docs/architecture.md#4-review-closure-and-acceptance-criteria) remain outstanding.
-They include policy-local alias matching, finding identity migration, collection completeness and
-durable checkpoints, generation-fenced replacement, full backup/restore and SDK allow-list enforcement.
-A passing smoke test does not certify Tier-1 collection or child identity-domain access.
+This is a new implementation of the enrollment and scanner design in
+[AGENTS.md sections 6–7](AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust).
+The previous implementation has been removed.
 
-> OSC never creates, updates or deletes anything in OCI. It **shows** the IAM statements it needs
-> (copy / download / `oci iam policy create` command) and **checks** whether they are applied.
+## Implemented
 
-## Quick start (workstation mode)
+- Setup-password-protected parent enrollment, with Terraform ZIPs and manual setup instructions.
+- Parent API-key scanner and separate OAuth Code + PKCE human login.
+- Parent default-domain `ogc_viewer` / `ogc_admin` authorization, five-minute membership checks,
+  checks before configuration changes, and session downgrade/revocation.
+- Organization discovery, child default-domain configuration, API-key → parent JWT → child UPST
+  exchange, and worker-local token renewal. Children use confidential-app client credentials for exchange and have no API keys.
+- Separate bounded collection scheduler: IAM/domain inventory, Cloud Guard, Security Zones,
+  Cloud Advisor, regional Audit ingestion, historical backfill and rolling reconciliation.
+- Coverage/findings/inventory/activity pages, normalized JSON exports, snapshot change history,
+  encrypted credentials and server sessions, and local retention.
+- Partial collection recovery, pause/resume, key repair, confirmed child-departure handling,
+  and fresh parent replacement with generation fencing and recoverable old-data cleanup.
 
-```bash
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+**OCI compatibility is not yet certified.** Python tests use synthetic data and mock remote calls;
+parent/child Terraform packages have passed validation against the pinned official provider.
+Live WIF caller authorization, scopes, all-domain reads, group completeness, human Me/group access,
+provisioning behavior and volume limits still need an authorized non-production organization.
+See [implementation status and release gates](docs/implementation/status.md).
+Tier 2 guardrail collectors and Tier 4/5 policy/anomaly engines are not enabled in this initial build.
 
-# 1. Bootstrap with your OCI CLI profile as the scan identity
-osc admin bootstrap --tenancy-ocid ocid1.tenancy.oc1..xxxx --scan-method cli_profile --profile DEFAULT
-#    One organization per deployment: bootstrapping a different parent later replaces the
-#    organization and deletes the previous one's local data (you are asked to confirm first).
+## Run locally
 
-# 2. See what to apply in the parent, then check it
-osc policies parent --check
-
-# 3. Pick a child, see its Endorse (parent) + Define/Admit (child) statements
-osc org show
-osc child select ocid1.tenancy.oc1..child
-osc policies child ocid1.tenancy.oc1..child
-
-# 4. After both IAM admins apply them
-osc child verify ocid1.tenancy.oc1..child
-osc child activate ocid1.tenancy.oc1..child
-
-# 5. Collect (Tier 1, read-only) once, or run the scheduler as its own process
-osc scan
-osc scheduler            # identity 6 h, governance 1 h, audit 15 min, reconcile + retention daily
-
-# Web UI (local sign-in is allowed from this machine in workstation mode)
-osc web     # http://127.0.0.1:8000  — Coverage, Governance, Access, Compartments, Activity
-```
-
-## Target production deployment (`oci` mode)
-
-After the production gates pass, run on OCI Compute with the **instance principal** as the scan identity and
-OCI IAM sign-in for admins:
+Python 3.11+ is required; this checkout was checked on Python 3.13. `uv.lock` also records
+transitive dependency versions/hashes (`uv sync --locked --extra dev` is an alternative install).
+Run from the repository root:
 
 ```bash
-export OSC_DEPLOYMENT=oci
-export OSC_SECRET_KEY=<Fernet key, injected from OCI Vault>
-export OSC_PUBLIC_BASE_URL=https://osc.example.com
-export OSC_DATA_ROOT=/var/lib/osc          # on an encrypted Block Volume
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
 
-osc admin bootstrap --tenancy-ocid ocid1.tenancy.oc1..xxxx \
-  --scan-method instance_principal \
-  --admin-method oidc --domain-url https://idcs-xxxx.identity.oraclecloud.com \
-  --client-id <app client id> --client-secret-ocid ocid1.vaultsecret.oc1..xxxx
-osc web --host 0.0.0.0
+# Generate once; retain this key separately from the database. Do not regenerate on restart.
+export OGC_ENCRYPTION_KEY="$(ogc encryption-key)"
+export OGC_SETUP_PASSWORD='<operator-chosen long random setup password, at least 16 characters>'
+export OGC_PUBLIC_BASE_URL='http://127.0.0.1:8000'
+export OGC_DATA_ROOT='/path/to/private/ogc-data'
+
+ogc web --host 127.0.0.1 --port 8000
 ```
 
-In `oci` mode the CLI-profile method and local sign-in are disabled, `OSC_SECRET_KEY` is required,
-`OSC_PUBLIC_BASE_URL` must be `https://`, and the web UI only accepts members of `OSC-Admins` /
-`OSC-Viewers`. Put it behind TLS. The UI only answers to the host in `OSC_PUBLIC_BASE_URL` (plus
-`OSC_TRUSTED_HOSTS`); add the load balancer's health-check host there if it uses a different one.
-API-key scan connections in `oci` mode are unsupported by the design; the current signer needs
-consistent enforcement. Container Instance resource-principal deployment needs a separate validated
-matching rule and capability evidence. Identity-domain setup: [`docs/iam/parent-domain-setup.md`](docs/iam/parent-domain-setup.md).
+Optional: `OGC_AUDIT_BACKFILL_HOURS` (default 168) limits how many historical Audit hours each scan
+backfills; current events are always caught up to the present.
 
-## Configuration
+Local development supports HTTP on `localhost`, `127.0.0.1`, or `[::1]`. Set `OGC_PUBLIC_BASE_URL`
+to the origin only (for example `http://127.0.0.1:8000`), without `/setup` or any other path.
+Restart OGC after changing this setting, then open `http://127.0.0.1:8000/setup` in your browser.
+Use the configured origin and register its `/auth/callback` URL with the parent OIDC application.
+Development sessions use a separate HttpOnly, SameSite=Lax cookie without the Secure flag.
 
-All settings are environment variables prefixed `OSC_` (see `src/oci_security_center/config.py`):
-`OSC_DEPLOYMENT`, `OSC_DATA_ROOT`, `OSC_RETENTION_DAYS` (90),
-`OSC_RETENTION_OVERRIDES__AUDIT_EVENTS`, `OSC_CONTROL_PLANE_EVENT_RETENTION_DAYS` (365), `OSC_GROUP_ADMINS`, `OSC_GROUP_VIEWERS`,
-`OSC_GROUP_SCANNERS`, `OSC_DYNAMIC_GROUP_SCANNER`, `OSC_IDENTITY_DOMAIN_NAME`, `OSC_PARENT_ALIAS`,
-`OSC_PUBLIC_BASE_URL`, `OSC_TRUSTED_HOSTS` (extra Host names, JSON list),
-`OSC_SESSION_IDLE_MINUTES` (30), `OSC_SESSION_MAX_HOURS` (12), `OSC_GROUPS_CLAIM`, `OSC_OIDC_SCOPES`,
-`OSC_SECRET_KEY`, `OSC_MAX_WORKERS` (8).
+For production, set `OGC_PUBLIC_BASE_URL` to your HTTPS origin, such as `https://ogc.example.com`,
+and put the web process behind an HTTPS reverse proxy that preserves the configured Host header.
+HTTPS sessions use Secure, HttpOnly, SameSite=Lax cookies with the `__Host-` prefix and HSTS.
+The backend binds to loopback by default. Request access logging is disabled so OIDC authorization
+codes do not enter access logs. OGC's public URL is configuration, not inferred from untrusted
+forwarded headers. Hosting/deployment automation remains in the backlog.
 
-Collection: `OSC_COLLECTION_TIER` (1; tiers 2–5 not built yet), `OSC_SCAN_LEASE_SECONDS` (900),
-`OSC_SCHEDULE_AUDIT_MINUTES` (15), `OSC_SCHEDULE_GOVERNANCE_MINUTES` (60),
-`OSC_SCHEDULE_IDENTITY_MINUTES` (360), `OSC_SCHEDULE_GUARDRAILS_MINUTES` (1440).
-Audit ingestion (proposed defaults, tune in the POC): `OSC_AUDIT_SOURCE` (`logging_search` |
-`audit_api`), `OSC_AUDIT_INGESTION_DELAY_MINUTES` (5), `OSC_AUDIT_OVERLAP_HOURS` (24),
-`OSC_AUDIT_CHUNK_MINUTES` (60), `OSC_AUDIT_MIN_SPLIT_MINUTES` (1), `OSC_AUDIT_INITIAL_MINUTES` (60),
-`OSC_AUDIT_FORWARD_CHUNKS_PER_RUN` (48), `OSC_AUDIT_BACKFILL_CHUNKS_PER_RUN` (24),
-`OSC_AUDIT_RECONCILE_CHUNKS_PER_RUN` (24), `OSC_AUDIT_BACKFILL_DAYS` (= audit retention),
-`OSC_AUDIT_SEARCH_RESULT_CAP` (unset until gate Q2 is known).
-Operations: `OSC_SWITCH_DRAIN_SECONDS` (120), `OSC_BACKUP_RETENTION_DAYS` (30).
+In a second process with the same settings and encryption key:
 
-## Storage
+```bash
+ogc scheduler
+# Or collect once:
+ogc scheduler --once
+```
 
-SQLite only (Phase 1): `OSC_DATA_ROOT/osc.db` plus `audit/g<generation>/<tenancy_ocid>/<YYYY-MM>.db`. Schema
-changes run as numbered migrations with a pre-migration backup. The directory is `0700` and
-files are `0600`. Secrets are supported Vault references or Fernet-encrypted. Vault retrieval requires
-a keyless scan identity; API-key-only scanning uses a local encrypted key. `osc db purge` applies retention.
-`osc db backup <dir>` writes a complete, verified backup set (osc.db, audit files, manifest with
-checksums); `osc db restore <backup>` restores it offline (stop `osc web` and `osc scheduler` first).
-The encryption key is not in the backup — keep it separately. See
-[storage §6.1](docs/storage.md#61-full-backup-and-restore-contract).
+Use the **Scan** tab to start an on-demand full scan or save a **daily** (time) or **weekly**
+(day and time) schedule with a timezone. Only `ogc_admin` can change these controls; viewers can
+see the schedule and history. Keep `ogc scheduler` running separately: web requests queue work,
+and the tab shows when the worker is offline. Recurrence is disabled until a schedule is saved.
+These calendar schedules replace the previous fixed collection intervals. New enrollment and
+child configuration still trigger collection automatically. Paused children remain paused.
+See [scan controls and scheduling](docs/scanning.md) for recovery and daylight-saving behavior.
 
-## Development
+Open the public URL, enter the setup password, and follow the enrollment wizard. Apply the parent
+setup as a tenancy administrator, provide the scanner and OIDC credentials, and finish with an
+`ogc_admin` sign-in. Configure each discovered child with its default-domain URL and confidential-app client ID/secret;
+OGC discovers
+the domain identifiers, home region and service user named `ogc`. Failed scanner authentication does
+not prevent OIDC login or viewing historical data.
+
+## Setup packages and Resource Manager
+
+```bash
+ogc setup-package parent /tmp/ogc-parent.zip
+ogc setup-package child /tmp/ogc-child.zip
+```
+
+Both ZIPs contain Terraform JSON, a Resource Manager schema, and setup instructions. They configure
+IAM prerequisites only; they do not deploy the OGC application. Run Terraform/Resource Manager as
+an authorized administrator in the target tenancy. OGC never applies the configuration itself.
+Generate the parent scanner key pair locally and pass only its PUBLIC key to Terraform. Supply the
+private key to OGC over HTTPS after provisioning. Treat OIDC application Terraform state as sensitive.
+
+For a direct **Deploy to Oracle Cloud** button, publish immutable parent and child ZIPs to a
+Resource Manager-supported location and set `OGC_PARENT_PACKAGE_URL` / `OGC_CHILD_PACKAGE_URL`.
+Until published, the application offers download plus the Resource Manager upload workflow.
+It never emits a deploy link pointing to a nonexistent public package.
+
+## Storage and operator commands
+
+`OGC_DATA_ROOT/ogc.db` stores application state, coverage, normalized inventory and findings.
+Credentials, enrollment candidates and server-side sessions are encrypted using Fernet.
+Audit events live under `audit/g<N>/<hashed-tenancy>/<YYYY-MM>.db` and are committed before
+interval receipts/checkpoints. Runtime directories are private. Retention defaults to 90 days;
+local control events use 365 days. Parent replacement removes the previous organization's control
+history as well as inventory, findings, audit, credentials, sessions, managed backups and exports.
+Key repair preserves organization history and fences existing workers/sessions.
+
+```bash
+ogc scan --family identity
+ogc scan --family governance
+ogc scan --family audit
+ogc purge
+```
+
+Do not lose the encryption key or store it inside the data directory. A failed organization cleanup
+is journaled and fences collection; starting the application again retries cleanup. Do not declare
+replacement complete until cleanup succeeds. Previously downloaded files are outside OGC's control.
+
+## Quality gates
 
 ```bash
 ruff format --check .
 ruff check .
 mypy src
-pytest -m "not live"
+pytest -m 'not live'
 ```
 
-`tests/unit/test_read_only.py` rejects known mutating names. It is a supplementary deny-list, not
-complete SDK allow-list enforcement; the required boundary and bypass tests are in architecture §3.
-Use synthetic fixtures; a recorded-response sanitizer is not yet implemented. Planned tier/backfill
-settings in the collection design are not supported runtime settings until added to Settings.
+[Tests](tests/) prohibit live network connections. The SDK operation allow-list and static boundary
+tests reject unreviewed operations and SDK/HTTP construction outside reviewed modules. Generated
+Terraform is validated separately with `terraform init -backend=false` and `terraform validate`;
+neither validation nor the unit suite applies resources or certifies live OCI permissions.
+
+## Browser regression check
+
+With Node 22+ and Google Chrome installed, run `node tests/browser/setup.mjs` from the repository
+root. Set `CHROME_PATH` for a different Chromium executable. This starts a temporary local server
+and isolated browser profile with synthetic credentials, submits the setup form, and checks the
+browser-generated Origin header and successful onboarding unlock. No OCI credentials are used.
+
+Parent enrollment reports the verification step that failed, such as API-key validation,
+GetTenancy/GetUser/GetDomain, identity-domain ListUsers/ListGroups, or organization discovery.
+The same safe diagnostic is written to the server log. Error responses omit raw OCI bodies,
+private keys, and login secrets. When requesting help, share the step and safe diagnostic only.
+
+Enrollment values are saved as an encrypted server-side draft when you select **Save draft** or
+**Verify credentials and sign in**. A failed check returns to the same form. Saved private keys
+and client secrets can be reused with their inputs left blank; uploading or entering replacements
+updates them. Reloading the page or restarting OGC retains the draft within the same browser setup
+session (one hour by default, controlled by `OGC_SESSION_SECONDS`). Browser cookies and the original
+encryption key must be retained. Drafts are cleared by discard, cancellation, completed enrollment,
+or a fresh replacement flow; changing parent domain/tenancy metadata clears saved credentials.
+
+Human login uses Authorization Code + PKCE and requests only `urn:opc:idm:__myscopes__`.
+It does not request `openid`, `profile`, or `groups` or require an ID token. OGC verifies the
+returned user access token's signature, issuer, expiry, identity-domain API audience, and OAuth
+client binding. It POSTs that access token to `/admin/v1/Asserter` with `includeMemberships=true`,
+binds the returned user to verified `user_id` or `sub`, and checks the configured `ogc_admin` or
+`ogc_viewer` group IDs. Client-only tokens and group display names do not authorize login.
+
+The access token and identity binding remain encrypted in the server-side session for membership
+rechecks every five minutes and before configuration changes. Expiry or older sessions without
+the required access-token binding require a fresh login. The existing confidential application
+must allow `urn:opc:idm:__myscopes__` and permit the assertion; live-domain acceptance remains a gate.
+Group diagnostics show verified access-token and Asserter group fields and safe failure stages,
+excluding tokens, authorization codes, client secrets, and unrelated profile values.
+
+The scanner also uses `urn:opc:idm:__myscopes__` for API-key-to-parent-JWT issuance before child
+UPST exchanges. It does not use human login credentials. Parent collection uses its API key directly.
+
+Run `node tests/browser/setup.mjs --enrollment` to check the full credential POST → local login
+redirect → identity-domain navigation in Chrome. OCI verification/discovery are synthetic, and the
+identity-domain page is intercepted locally. Enrollment CSP permits only the configured domain's
+HTTPS origin in addition to local form targets, so Chrome can follow this redirect chain.
+
+Signing-key retrieval uses the newly received access token as bearer authorization against the
+trusted identity-domain JWKS endpoint. This supports domains that disallow anonymous signing-key
+reads. Logs distinguish code exchange, signing-key retrieval, local access-token validation, and
+Asserter authorization. An omitted token-response `scope` field is reported as omitted; it is not
+interpreted as an empty permission grant. ID-token presence is not checked or required.
