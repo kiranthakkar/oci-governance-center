@@ -1,4 +1,4 @@
-# AGENTS.md — OCI Security Center
+# AGENTS.md — OCI Governance Center
 
 Guidance for AI coding agents (Claude Code, Codex, Cursor, etc.) and humans working in this repository.
 Keep this file current: when an architectural decision changes, update it in the same PR.
@@ -7,7 +7,7 @@ Keep this file current: when an architectural decision changes, update it in the
 
 ## 1. What we are building
 
-**OCI Security Center** is a Python **governance and observability** tool that gives a team a single pane
+**OCI Governance Center** is a Python **governance and observability** tool that gives a team a single pane
 of glass over an **Oracle Cloud Infrastructure (OCI) Organization** — the parent tenancy and every child
 tenancy. It inventories what exists, shows observed access grants, checks that governance guardrails are in
 place and makes activity observable. It is not a security scanner (see non-goals).
@@ -32,14 +32,14 @@ evaluator. Dashboards show unsupported, partial and stale coverage explicitly. T
 current implementation gates are in `docs/architecture.md` §4.
 
 ### Non-goals (for now)
-- Auto-remediation or **any** write action against any tenancy, parent or child. **OSC is strictly
+- Auto-remediation or **any** write action against any tenancy, parent or child. **OGC is strictly
   read-only.** It shows the IAM policies it needs; humans apply them.
 - Multi-cloud support.
 - Replacing Cloud Guard. We aggregate and correlate; Cloud Guard remains the detector of record.
 - Security-scanner data: credential hygiene (MFA status, key/token age), expiring keys or certificates,
   network or bucket exposure, vulnerability scanning and Data Safe results.
 - Workload, service and flow-log contents; metrics.
-- Creating or enforcing Security Zones from the parent (a governance use case, deferred; OSC stays
+- Creating or enforcing Security Zones from the parent (a governance use case, deferred; OGC stays
   read-only).
 
 ---
@@ -53,16 +53,17 @@ This is a security tool with read access to an entire Organization. Treat it lik
    the control plane; moving one outside collectors does not make it permitted. A future write feature
    requires an explicit design change. SDK constructors/signers and OIDC credential issuance are
    separately reviewed infrastructure operations. Enforced by the explicit allow-list in
-   `oci_clients/allowlist.py` (every factory client is a `ReadOnlyClient`) plus the static and bypass
-   tests in `tests/unit/test_sdk_boundary.py`; the older deny-list test stays as a second guard
-   (`docs/architecture.md` §3).
-2. **Least privilege.** The IAM policies in `docs/iam/` are the source of truth for what the tool needs.
-   If you add a collector that needs a new permission, update those policy templates in the same change.
+   `oci_clients/__init__.py` (every factory client is a `ReadOnlyClient`), the static surface tests
+   in `tests/unit/test_sdk_boundary.py` and the runtime bypass tests in
+   `tests/unit/test_auth_and_boundary.py` (`docs/architecture.md` §3).
+2. **Least privilege.** `docs/iam/ogc-local-read.md` is the source of truth for what the tool needs;
+   `provisioning/bundle.py` renders it into the setup packages and manual guides. If you add a
+   collector that needs a new permission, update both in the same change.
 3. **No secrets in the repo, logs, or test fixtures.** No API private keys, fingerprints paired with keys,
-   auth tokens, or `~/.oci/config` contents. Prefer instance/resource principals; otherwise reference keys
-   by path or by **OCI Vault** secret OCID.
+   auth tokens, or `~/.oci/config` contents. The current scanner uses only the parent API key (§6),
+   encrypted at rest with the encryption key managed separately.
 4. **Redact before logging.** Never log full request/response bodies from the OCI SDK. Use the logging
-   helpers in `oci_security_center/logging.py` (structured JSON, redaction filter).
+   helpers in `oci_governance_center/logging.py` (structured JSON, redaction filter).
 5. **Sanitized fixtures only.** Recorded API responses under `tests/fixtures/` must have real OCIDs,
    tenancy names, IPs, user names and emails replaced with synthetic values
    (e.g. `ocid1.tenancy.oc1..aaaafake0001`).
@@ -83,7 +84,7 @@ This is a security tool with read access to an entire Organization. Treat it lik
 | CLI | `typer` |
 | Web admin UI + API | `FastAPI` + server-rendered Jinja2 templates, no JS framework (strict CSP) |
 | OIDC client | `authlib` (Authorization Code + PKCE, ID-token validation) |
-| Persistence | **SQLite only (Phase 1)** on the OSC server: `osc.db` + per-tenancy monthly audit DBs; stdlib `sqlite3` behind the storage interfaces (no ORM; SQLAlchemy/Alembic are proposed with the ADB/MySQL backends); 90-day default retention (`docs/storage.md`). Future backends behind the same `DataStore`/`Sink` interfaces: Object Storage, ADB, MySQL, DB MCP server (write path) |
+| Persistence | **SQLite only (Phase 1)** on the OGC server: `ogc.db` + per-tenancy monthly audit DBs; stdlib `sqlite3` behind the storage interfaces (no ORM; SQLAlchemy/Alembic are proposed with the ADB/MySQL backends); 90-day default retention (`docs/storage.md`). Future backends behind the same `DataStore`/`Sink` interfaces: Object Storage, ADB, MySQL, DB MCP server (write path) |
 | Concurrency | `concurrent.futures.ThreadPoolExecutor` (the OCI SDK is synchronous) |
 | Testing | `pytest`, `pytest-mock`; no live OCI calls in unit tests |
 | Lint/format/types | `ruff` (lint + format), `mypy --strict` on `src/` |
@@ -91,47 +92,24 @@ This is a security tool with read access to an entire Organization. Treat it lik
 
 ---
 
-## 4. Repository layout (target; ✓ = exists in v0.1)
+## 4. Repository layout
 
-```
-.
-├── AGENTS.md / CLAUDE.md
-├── pyproject.toml
-├── docs/
-│   ├── architecture.md           # design contracts, implementation status and release gates
-│   ├── delta-fetching.md         # audit durability, checkpoint and replay contract
-│   ├── collection.md             # ✓ what is collected, by tier; APIs, regions, fields, findings
-│   ├── iam/                      # catalog + parent/cross-tenancy/single-tenancy templates
-│   └── detections/               # catalog; one specification per enabled rule; planned rules labeled
-├── src/oci_security_center/
-│   ├── cli.py                    # ✓ typer entry point: `osc ...`
-│   ├── runtime.py                # ✓ wires settings, storage, secrets, control plane
-│   ├── web/                      # ✓ FastAPI app, server-side sessions, OIDC, templates
-│   ├── config.py                 # app settings (pydantic-settings), no secrets
-│   ├── logging.py                # structured logging + redaction
-│   ├── auth/                     # signer factory: config profile, instance/resource principal, session token
-│   ├── control_plane/            # tenant registry, onboarding, access verification, org discovery
-│   ├── oci_clients/              # thin client factory: region + signer -> SDK client, retries, pagination
-│   ├── collection/               # ✓ collector contract, registry, scan runner, audit coordinator, scheduler
-│   ├── collectors/               # READ-ONLY data collection, one module per service
-│   │   ├── organization.py       # ✓ tenant_manager_control_plane: list child tenancies
-│   │   ├── identity.py           # ✓ compartments, region subscriptions, policies, identity domains
-│   │   ├── identity_domains.py   # ✓ users, groups, dynamic groups per domain (minimal fields)
-│   │   ├── cloud_guard.py        # ✓ configuration, open problems, security zones (reporting region)
-│   │   └── optimizer.py          # ✓ Cloud Advisor enrollment and recommendations
-│   ├── models/                   # pydantic: Tenancy, Finding, PolicyStatement, AuditEvent, ScanRun...
-│   ├── analyzers/
-│   │   ├── policy/               # statement parser + rule engine
-│   │   └── audit/                # anomaly rules + baselines
-│   ├── storage/                  # AppStateStore + DataStore + Sink interfaces; SQLite backend (Phase 1)
-│   └── reporting/                # JSON / CSV / HTML exports
-└── tests/
-    ├── unit/
-    ├── fixtures/                 # sanitized recorded responses
-    └── integration/              # opt-in, live OCI, marked `@pytest.mark.live`
-```
+The new package is `src/oci_governance_center/`; the deleted `oci_security_center` implementation
+must not be restored. Current source modules:
 
-Collectors return **pydantic models**, never raw SDK objects. Analyzers never call OCI.
+- `models.py`, `config.py`, `logging.py`: contracts, operator settings and redaction.
+- `auth/`: independent human OIDC, verified JWTs and parent API-key and encrypted child OAuth/WIF credentials.
+- `oci_clients/`: official SDK construction, read-operation allow-list and pagination adapters.
+- `provisioning/`: administrator-applied Terraform and manual guides; no runtime resource writes.
+- `storage.py`: SQLite, encrypted credentials/sessions, scoped snapshots and durable Audit events.
+- `service.py`: enrollment, organization discovery, child lifecycle and collection orchestration.
+- `collectors/`, `analyzers.py`, `severity.py`: explicit field projections and pure governance analysis.
+- `web/`: FastAPI routes, server-rendered templates and static CSS; no frontend framework.
+- `cli.py`: `ogc web`, separate `ogc scheduler`, one-shot scan, retention and setup package commands.
+
+Tests use synthetic fixtures and block network access. Current capability/release status is in
+`docs/implementation/status.md`; older design pages do not certify the new implementation.
+Collectors return pydantic models; analyzers never call OCI.
 
 ---
 
@@ -140,7 +118,8 @@ Collectors return **pydantic models**, never raw SDK objects. Analyzers never ca
 - **Tenancy** — `ocid`, `name`, `alias`, `org_role`, `home_region`, `subscribed_regions`,
   `organization_id`, `parent_tenancy_ocid`, `onboarding_status`
   (`discovered` → `pending` → `verified` → `active`, or `error`), `last_verified_at`, `last_scanned_at`.
-  Credentials are separate parent `Connection`s (`admin|scan`), not per-child auth profile fields.
+  Credentials are separate `Connection`s (`admin|scan|delegated_scan`), never tenancy fields.
+  Optional per-tenancy delegated scan connections follow `docs/delegated-scans.md`.
 - **ScanRun** — id, start/end, tenancies attempted/succeeded/failed, per-collector status and errors.
 - **Finding** — the normalized unit every pillar emits:
   source-specific versioned identity (`docs/storage.md` §3.4),
@@ -153,188 +132,347 @@ Collectors return **pydantic models**, never raw SDK objects. Analyzers never ca
 - **AuditEvent** — normalized audit record (event type, principal, source IP, user agent, compartment,
   resource, time, request action, response status).
 
-The current severity enum lives in `models/findings.py`. Source-specific severity mappings belong in
-a single `models/severity.py` module when governance collectors are implemented; that module is planned.
+Current model definitions are in `models.py`; the full domain schema above remains a design target.
+Source-specific severity mapping is in `severity.py`.
 Required additions: `CollectionScope`, complete manifests, organization generation and leases, durable
 audit batch receipts and interval checkpoints (`docs/storage.md`, `docs/delta-fetching.md`).
 
 ---
 
-## 6. OCI integration conventions
+## 6. OCI integration — enrollment, application access and scanner trust
 
-### Authentication
-Full design: `docs/control-plane.md`. One signer factory in `auth/`. The **parent** tenancy has an
-**admin** connection (interactive) and a **scan** connection (non-interactive). Children have **no
-connections of their own**: they are reached cross-tenancy only, through the parent's scan identity.
+**Decisions: 2026-10-21; interview consolidated 2026-10-22.** OCI Governance Center (OGC)
+has a new implementation under `src/oci_governance_center/`. Local validation and live release
+gates are tracked in `docs/implementation/status.md`. Sections 6 and 7 define the
+current enrollment, login, scanning and organization-replacement design. They supersede conflicting
+older descriptions elsewhere in this file and `docs/`, including the historical decisions in §11.
+The remaining specifications await separate review.
 
-Deployment modes (`OSC_DEPLOYMENT`):
-- `workstation` — dev/POC. Scan identity is a CLI profile (B) or a service user + API key (C). Admin sign-in
-  is OIDC or the local CLI profile (localhost only).
-- `oci` — target production on OCI Compute. Scan identity is the **instance principal**
-  (dynamic group `OSC-Scanner-DG`). Admin sign-in is OIDC only. Methods B and C are unsupported;
-  C rejection is a runtime release requirement. Container Instance resource-principal deployment
-  requires validated authentication/matching rules before support is advertised (control-plane §2.3).
+### 6.1 Deployment and enrollment boundary
 
-Roles: `OSC-Admins` (connections, onboarding, policy screens, verify) and `OSC-Viewers` (findings,
-policy review, audit views and exports), mapped from identity-domain groups. Every route is
-authorized server-side.
+- OGC is already running on a customer-selected host. Deploying the application or its hosting
+  infrastructure is outside this release and remains in the backlog.
+- Each OGC installation supports **one parent organization with multiple child tenancies**.
+  Users enroll the parent; discovered children are configured under that parent, not independently.
+- An installation with no enrolled parent presents a first-run web enrollment wizard. An
+  **operator-supplied setup password** protects it before OIDC is configured. Disable that password
+  after enrollment; subsequent configuration and parent replacement require `ogc_admin` login.
+- The wizard collects the parent tenancy OCID, its **default identity-domain GUID**, and other
+  required metadata such as home region and OGC's callback/base URL. Treat domain GUID, domain
+  OCID, domain URL and tenancy OCID as distinct values and verify their relationships.
+- Generate setup Terraform with a **Deploy to Oracle Cloud** Resource Manager button and a
+  downloadable bundle. Also provide equivalent step-by-step OCI Console instructions.
+  Administrators create the resources through Resource Manager/Terraform or the Console;
+  OGC never applies Terraform or performs OCI resource mutations itself.
 
-Connection methods:
-- **A. OIDC + token exchange** — admin signs in to the parent's identity domain (Authorization Code +
-  PKCE, confidential integrated app). The access token is exchanged for an OCI **UPST** using
-  `oci.auth.signers.TokenExchangeSigner`. Needs an Identity Propagation Trust in the domain.
-  **Admin/interactive use only; never used by the scheduler.**
-- **B. OCI CLI settings** — `~/.oci/config` path + profile name (API-key or `security_token_file`
-  profiles). Store only path + profile. Turned off by default in server deployments.
-- **C. User + API key** — user OCID, fingerprint and locally Fernet-encrypted key reference in v1;
-  Vault-backed API-key-only bootstrap is unsupported because it creates a credential dependency cycle
-  (`docs/control-plane.md` §3.1). Vault references require an independently usable keyless scan identity.
-- **Instance / resource principal** — preferred scan identity when OSC runs in OCI.
-- **Cross-tenancy** — how a parent identity reaches each child (Endorse/Admit, below).
+### 6.2 Parent setup and completion
 
-Rules: never store private keys or client secrets in plaintext; tokens/UPSTs stay server-side and are
-never sent to the browser or logged; the OIDC console URL (`cloud.oracle.com/?tenant=...`) is **not** an
-issuer — use the identity domain URL and its `/.well-known/openid-configuration`.
+The parent setup creates an API-key-capable user named `ogc` in its **default identity domain**,
+the `ogc_scanner`, `ogc_viewer` and `ogc_admin` groups, required memberships and local read policies,
+and a dedicated OIDC application for human login. These are identity-domain groups, not built-in
+OCI administrator roles. The administrator selects an existing default-domain human user;
+setup adds that user to `ogc_admin` so initial application administration is possible.
 
-### Policy templates (displayed by the control plane, never applied by OSC)
-The full statement sets and screen behavior are in `docs/control-plane.md` §5:
-- **Organization configuration screen** → everything OSC needs in the **parent**: identity-domain
-  prerequisites, the `osc-parent-access` policy (admins + scanner), and the combined
-  `osc-endorse-children` roll-up.
-- **Child configuration screen** → for one child: the **Endorse** statements for the parent and the
-  **Define/Admit** statements for the child's IAM admin.
+The administrator generates the scanner key pair locally. Setup registers **only the public key**
+on the parent `ogc` user. The private key must not enter Terraform configuration, state or outputs.
+After creating resources, the administrator returns to the wizard and supplies the `ogc` user OCID,
+API-key fingerprint and matching private-key file, plus the human-login OIDC client ID and secret.
+The wizard uses non-secret identifiers returned by setup and verifies them against the parent.
 
-Each block has copy, download and an OCI CLI command, plus a read-only status check
-(✅ detected / ❌ missing / ⚠️ can't check). Core cross-tenancy shape (`oci` mode, dynamic group):
-```
-# parent
-Define tenancy <ChildAlias> as <child_tenancy_ocid>
-Endorse dynamic-group <OSC-Scanner-DG> to read all-resources in tenancy <ChildAlias>
-# child
-Define tenancy <ParentAlias> as <parent_tenancy_ocid>
-Define dynamic-group <OSC-Scanner-DG> as <scanner_dynamic_group_ocid>
-Admit dynamic-group <OSC-Scanner-DG> of tenancy <ParentAlias> to read all-resources in tenancy
-```
-Start broad (`read all-resources`) for the MVP, then tighten to the specific families each collector needs
-(e.g. `cloud-guard-family`, `audit-events`, `optimizer-api-family`, `policies`, `compartments`).
-**Verify family/resource-type names against current OCI docs before shipping a template.**
-Identity Domains change how groups are referenced — handle both default-domain and named-domain groups.
+Upload the private key over HTTPS and encrypt it at rest. The operator supplies the encryption
+key separately from the application database. Protect OIDC secrets similarly. Never display or
+export the stored private key or include credentials in logs, URLs or ordinary stack outputs.
+Terraform may retain OIDC application secrets in state: treat that state as sensitive and provide
+explicit secure handoff instructions rather than presenting secrets as normal outputs.
 
-### Clients, regions, pagination, retries
-- Build clients through `oci_clients/` only. Always pass `retry_strategy=oci.retry.DEFAULT_RETRY_STRATEGY`.
-- A new SDK operation needs, in the same change: an entry for its exact client class in
-  `oci_clients/allowlist.py` (reads only), a matching IAM template update if permissions change, and
-  code that uses it (the boundary test fails on unused or unlisted operations). Local methods whose
-  names collide with SDK operations are exempted per file + receiver in that test, never by name.
-- Use `oci.pagination.list_call_get_all_results` (or the generator variants for large sets). Never
-  hand-roll `opc-next-page` loops.
-- Region awareness is mandatory:
-  - IAM reads that must be authoritative → **home region**.
-  - **Cloud Guard** → query the tenancy's **reporting region** (from `get_configuration`).
-  - **Audit** → regional; iterate every **subscribed region** (`list_region_subscriptions`).
-  - **Optimizer / Cloud Advisor** → home region; may be disabled per tenancy — detect and report.
-- Prefer `compartment_id_in_subtree=True` + `access_level="ACCESSIBLE"` from the tenancy root where an
-  API supports it; otherwise walk the compartment tree (cache it per scan run).
-- Handle `oci.exceptions.ServiceError` explicitly: 401/404 on a child tenancy = access/onboarding
-  problem → record as a coverage finding; 429 = back off (retry strategy); 5xx = retry then record.
+Enrollment completes only after scanner credential/access verification and a successful OIDC
+sign-in by a member of the **new parent's `ogc_admin` group**. Start parent scanning and discover
+children after completion. Newly discovered children remain **Not configured** until their setup
+and verification are complete. Resource creation or Terraform success alone is not verification.
 
-### Concurrency
-- Parallelize across `(tenancy, region, collector)` units with a bounded `ThreadPoolExecutor`
-  (default 8 workers, configurable). Create SDK clients per worker; do not share a client across threads.
-- Respect OCI API rate limits; never fan out unbounded.
+### 6.3 Human login and application authorization
+
+Human login uses OIDC through the enrolled parent's **default identity domain**, with its own
+client ID and secret. Login is separate from scanner authentication; scanners never use those
+client credentials. Only the parent's groups determine application access:
+
+| Parent default-domain group | Application access |
+|---|---|
+| `ogc_viewer` | Login and view collected data, findings and reports across the parent and every configured child; no configuration changes. |
+| `ogc_admin` | Login, view organization-wide data and manage configuration, including scanner credentials, child setup, pause/resume and parent replacement. |
+| Both groups | Administrator access. |
+| Neither group | No application access. |
+
+`ogc_scanner` grants OCI read access to the automation identity; it grants no application login
+rights by itself. Child-domain group membership grants no application access. Administrators
+manage all group membership in OCI; OGC reads and enforces membership and provides no membership
+or role-assignment write feature.
+
+Re-check membership at least every five minutes during active sessions and before configuration
+changes. If membership cannot be verified, deny configuration changes. At the next membership
+check, losing both login groups ends the session; losing `ogc_admin` while retaining `ogc_viewer`
+reduces access to viewing. Enforce authorization server-side on every protected route.
+
+Keep OIDC login independent of scanner availability. An invalid scanner key must not prevent
+an authorized human from signing in, viewing historical data or repairing credentials. Membership
+verification must support this separation; a failed membership check never grants admin access.
+
+### 6.4 Scanner credentials and tenancy-level permissions
+
+Parent inventory and organization discovery use the parent `ogc` API key directly. Parent
+API-key-to-JWT issuance also uses that key, without OAuth client credentials. Each child stores
+its confidential application's client ID and secret encrypted for JWT-to-UPST caller authentication.
+These credentials are distinct from the human login application. Do not introduce CLI profiles,
+instance/resource principals, interactive delegated-login grants or child API keys.
+
+`ogc_scanner` receives tenancy-level local read permissions for the required datasets: Cloud Guard,
+Security Zones, Audit logs, Cloud Advisor, compartments, subscribed regions, users, groups and
+membership, IAM policies, identity domains, and organization/child discovery where applicable.
+Map the actual collector operations to current OCI resource types and least-privilege read grants
+before publishing the templates. The application-access groups are not scanner resource permissions.
+
+The default-domain scanner identity must scan **every identity domain in its tenancy, including
+new domains**, using tenancy-level read grants. Do not require separate users, trusts or routine
+Terraform updates per target domain. Discover domains on subsequent scans and read their resources.
+Validate this behavior for users, groups and memberships with the actual SDK endpoints. Any denied
+or unsupported domain read is an explicit coverage gap, never proof of an empty domain.
+
+The parent and children each have their own local scanner permissions. Parent group membership
+alone grants no child access. **Endorse/Admit policies are not an OGC access mechanism.**
+
+### 6.5 Child Configure and setup
+
+For each discovered child, Configure asks for its **default identity-domain URL** plus the child
+confidential application's **client ID and secret**. Other child metadata is discovered automatically.
+OGC derives its GUID from the validated URL, exchanges the parent JWT for a child UPST, and uses
+child credentials to discover the child's home region and active Default-domain OCID. Match the
+URL and domain ownership to the selected organization child. Search the child domain for exactly
+one active service user with `userName eq "ogc"`; discover its user OCID automatically. Validate
+that user and domain against child-tenancy IAM before saving configuration or enabling monitoring.
+No manual child user OCID, domain OCID, GUID or region is required for verification. Terraform
+stack inputs still require the target identifiers needed by the administrator to provision resources.
+Discovery/access failures preserve existing configuration and show the failed verification step.
+
+Generate a child-specific Terraform bundle and Deploy to Oracle Cloud button. The administrator
+signs into that child tenancy and reviews/applies its stack. Supply equivalent OCI Console
+instructions for customers performing setup manually. Both paths create the same prerequisites:
+
+1. A child-local `ogc` service user in the default domain and the groups/memberships required
+   for local scanning, including `ogc_scanner`. No child API key or scanner password is created.
+2. Local tenancy-level read policies covering the required resources across all identity domains.
+3. Identity Propagation Trust in the child's default domain, trusting the **parent default domain**
+   and mapping only the authorized parent `ogc` principal to the child-local `ogc` service user.
+   Bind the actual issuer, verification keys and required claims; do not use wildcard parent users.
+4. An active confidential application bound to the trust's OAuth client allow-list. The admin
+   retrieves its client ID and secret and supplies them to OGC for the child exchange.
+5. Verified setup identifiers and instructions for returning to OGC and checking access.
+
+Use the official OCI Terraform provider, including its
+[Identity Propagation Trust resource](https://docs.oracle.com/en-us/iaas/tools/terraform-provider-oci/latest/docs/r/identity_domains_identity_propagation_trust.html).
+Pin provider requirements and validate resource schemas. Provide explicit import/reuse instructions
+for pre-existing resources. OGC generates/checks setup but never executes provisioning.
+
+After setup, **successful verification automatically enables monitoring**; there is no separate
+Activate action. If identity/authentication succeeds but some datasets are inaccessible, enable
+collection of the accessible datasets and mark the child **Partial coverage** with explicit gaps.
+An authentication or identity-binding failure leaves that child disabled.
+
+### 6.6 API key → parent JWT → child UPST
+
+Parent scans use the API key directly. For child scans only:
+
+Child Terraform provisions an active confidential OAuth application (Client Credentials grant)
+and binds its OAuth client ID to the trust's `oauthClients`. The trust sets `subjectClaimName=sub`,
+`subjectType=User`, `subjectMappingAttribute=userName`, the parent issuer and JWKS endpoint, and
+an exact parent-ogc impersonation rule targeting the child service user. The rule matches the
+parent `ogc` user's **username** (the parent JWT `sub`, normally `sub eq ogc`), never its SCIM ID
+or OCID (decision 2026-10-22). Export the client ID
+and trust ID for validation; retrieve the generated client secret securely from the application's
+configuration and enter it in OGC. No secret is printed in ordinary Terraform outputs. OGC encrypts
+child credentials separately from child metadata and removes them on parent replacement. Protect
+Terraform state because it may contain the application's generated secret.
+
+1. Make an OCI API-key-signed request as the parent `ogc` user to the parent default-domain token
+   endpoint to obtain that user's JWT access token. This is a domain-issued token, not a locally
+   minted assertion claiming to be issued by the domain.
+2. Exchange that parent JWT through WIF at the child's default domain, authenticating the caller
+   with the child's confidential application client ID/secret using HTTP Basic. Its trust maps the exact
+   parent principal to the child `ogc` service user and returns a child UPST.
+3. Validate the returned principal and owning tenancy. Use the UPST with its bound signing key
+   and the official OCI SDK for child scans, including reads across the child's identity domains.
+4. Obtain fresh tokens before expiry using the same parent API key. Isolate token/signing-key state
+   by parent, child and domain, and invalidate affected cached state on credential/configuration changes.
+
+Oracle's [API-key-to-access-token request example](https://docs.oracle.com/en/cloud/paas/identity-cloud/idcsa/token_exchange_grant_type.html)
+authenticates the first exchange with an OCI request signature without an OAuth client secret.
+Use that flow for parent issuance; use child confidential-client credentials only for the second
+exchange. Oracle also documents
+[JWT-to-UPST exchange](https://docs.oracle.com/en-us/iaas/Content/Identity/api-getstarted/json_web_token_exchange.htm).
+Prove the combined flow, including first-hop scope, issued claims, child-exchange caller authorization,
+trust mapping, SDK support and renewal, in an authorized non-production organization. The OIDC
+application for human login must not become an implicit dependency of scanner authentication.
+
+### 6.7 Monitoring lifecycle and failure behavior
+
+- Administrators can **pause** a child without deleting its configuration or collected history.
+  Resume re-verifies access before restarting. Automatic coverage retries never override a pause.
+- Continue accessible datasets during partial coverage, retry failed datasets on schedule, and
+  automatically restore full coverage after successful reads. Clear warnings only on complete
+  successful checks of the affected scope. One child's failure must not stop healthy siblings.
+- Retry temporary network/service failures with bounded backoff; show delayed/stale coverage.
+  A temporary failed request is not confirmation that a key has been revoked.
+- A **confirmed invalid/revoked parent API key stops organization-wide collection**, including new
+  child exchanges; discard cached child tokens as agreed. Preserve historical data. Require an
+  administrator to supply and verify a valid key before collection resumes.
+- Recheck organization membership. If successful discovery confirms a child has left, stop monitoring
+  it and retain history under normal retention. Failed discovery shows unknown status, not removal.
+- Show failures through persistent in-application banners, status and coverage findings. No email or
+  external notifications in this release. Authorized users can still view history with stale warnings.
+- Preserve per-tenancy/domain/region/dataset coverage and timestamps. Failed/incomplete reads must
+  not erase prior inventory or resolve findings as though results were empty.
+- All OCI resource calls are read-only, with reviewed SDK operations, pagination, bounded concurrency
+  and retries. Use the scanned tenancy's IAM home region, Cloud Guard reporting region and subscribed
+  Audit regions. Never derive a child's scope from the parent's subscriptions.
+
+### 6.8 Parent replacement
+
+An authenticated `ogc_admin` can replace the parent through the UI. Replacement starts at the
+**same first screen as new parent onboarding**, with no reuse of old parent credentials, domain
+settings or child configuration. The existing admin session authorizes beginning replacement;
+finalization also requires successful `ogc_admin` sign-in against the newly configured parent.
+The disabled first-run setup password does not become an alternative way to replace a parent.
+
+Keep the existing organization intact until fresh onboarding and verification of the new parent
+succeed. A failed or canceled candidate setup leaves the existing organization operational.
+After successful onboarding, stop/fence old collection and requests, invalidate old sessions,
+install the new organization, and cleanly remove the old organization's server-held data and
+credentials, including child configurations, token caches, histories, server-managed backups and
+generated exports. Files already downloaded by users are outside OGC's control.
+
+The server must recover interrupted switches/cleanup safely and must not allow old workers or
+sessions to read or publish across organizations. Do not report replacement as complete while
+required cleanup remains unfinished. This release still has one active parent; future multi-parent
+support must allow distinct organization configuration, credentials, access and data boundaries.
+
+### 6.9 Scan tab and recurring collection
+
+Provide a Scan tab with an administrator-only on-demand full organization scan and one optional
+recurring schedule. Support exactly **daily** (time of day) and **weekly** (weekday and time of
+day), with an explicit IANA timezone. Administrators may update or disable recurrence; viewers
+may inspect the schedule, next run and history. Recurrence is initially disabled. Full scans
+include parent and configured, unpaused children, every identity domain, governance and Audit.
+
+Queue work durably for the separate scanner process; never run collection in the web request.
+Show queued/running/completed/partial/failed/interrupted history and worker offline status.
+Coalesce overlapping requests and missed occurrences, prevent concurrent organization runs and
+preserve partial dataset coverage. Calendar schedules replace fixed family collection intervals;
+initial enrollment and child configuration still trigger automatic collection. Fence all controls
+and worker results by organization generation. Clear schedules/history on successful parent
+replacement; preserve them during failed onboarding and same-parent credential repair.
+Flag incomplete scopes as OGC-ACCESS-002 scanner coverage findings with a distinct UI label.
+Provide incomplete-only Coverage filtering and scan details with per-scope diagnostics, tenancy,
+dataset, domain/region, timestamps and last success. Snapshot diagnostics when jobs finish; clearly
+label live coverage and unavailable older snapshots. Preserve historical failure evidence after
+recovery. Do not serve raw process logs, debug payloads or credentials through these views.
+See `docs/scanning.md` for timezone/DST, recovery, retention and authorization contracts.
 
 ---
 
-## 7. Pillar notes
+## 7. Implementation plan
 
-### 7.1 Control plane — "Add a new tenant"
-Full design, sequence diagram and security requirements: **`docs/control-plane.md`**. Summary:
-1. **Host bootstrap** registers the parent and non-interactive scan connection. Authenticated admins
-   use **Organization configuration** to manage the separate admin connection (OIDC domain URL, client
-   ID and secret reference, or supported local CLI profile). The screen lists every parent policy and
-   prerequisite with a read-only status check. API-key method C is a workstation scan identity.
-2. Authenticate and run a read-only connection test (get tenancy, list region subscriptions).
-3. **Discover children**: `OrganizationClient.list_organizations(compartment_id=<parent>)` →
-   `list_organization_tenancies(organization_id)` in the home region. If there's no Organization or
-   access is denied, allow manual registration by OCID.
-4. Admin **selects children**. All children are reached cross-tenancy only.
-5. **Child configuration screen** shows the **Endorse** statements for the parent tenancy and the
-   **Define/Admit** statements for the child's IAM admin. OSC applies neither. Status `pending`.
-6. **Verify** = read-only smoke test (get tenancy, list compartments, get Cloud Guard config, list audit
-   events for the last 5 min) → `verified` → `active`, or `error` with a reason.
-7. Never write to any tenancy, and never call mutating Organization APIs (`create_child_tenancy`,
-   `delete_organization_tenancy`, `approve_*`, `update_organization`, ...) — required enforcement
-   is the explicit SDK boundary plus static checks in architecture §3.
-8. Admin screens are limited to `OSC-Admins`; viewers read findings, policy review, audit views and
-   exports. First-time setup goes through `osc admin bootstrap` on the host. Every control-plane action is written to a local audit trail.
-   **One organization per deployment.** Bootstrapping a different parent replaces the organization:
-   after full configuration preflight, an exclusive maintenance lease drains work; a journaled switch
-   replaces local state and advances an organization generation. Stale requests/workers cannot commit.
-   Sessions end, old audit directories are quarantined/cleaned, and the control-plane audit trail is
-   kept (`docs/control-plane.md` §6.1). Historic backups follow their own retention. Re-bootstrapping
-   the same parent keeps children/onboarding; connection changes still fence old work and reverify access.
-   Replacement installs candidate parent/connections atomically; the six implementation review fixes
-   and their regression coverage are summarized in `docs/review-fixes.md`.
-9. Every scan re-checks the required statements. A missing one is a HIGH coverage finding
-   (`OSC-ACCESS-001`). A broader grant than OSC needs counts as present but is flagged by policy review.
-   Coverage findings fail closed: they are resolved only by a complete check. If the policy read or the
-   verify smoke test fails, open findings stay open and `OSC-ACCESS-001:check` / `:verify` is raised.
+This is a plan for a new implementation, not a record of completed work. Validate the identity
+path first; implement the enrollment experience and collection against these agreed contracts.
 
-### 7.2 Governance aggregation
-- **Cloud Guard problems**: `CloudGuardClient.list_problems` scoped to tenancy root, subtree, open problems.
-  Capture detector, risk level, labels, resource, target. Record whether Cloud Guard is enabled — a
-  disabled Cloud Guard is itself a HIGH finding.
-- **Security Zones**: list zones and recipes; violations surface through Cloud Guard problems —
-  classify them by detector type into `source="security_zone"`. Also report compartments holding
-  sensitive resources that are *not* in any security zone (later phase).
-- **Recommendations**: `OptimizerClient` recommendations (filter to security-relevant categories first,
-  include cost/perf as INFO). Report "Cloud Advisor not enabled" as a coverage finding.
-- Deduplicate using source-specific identities (`docs/storage.md` §3.4): native problem/recommendation
-  IDs, policy statement identities, scoped coverage failures, and anomaly occurrences. Maintain
-  `first_seen/last_seen`; resolve stateful findings only after complete same-scope evaluation.
+### 7.1 Prove authentication and tenancy-wide read access
 
-### 7.3 Policy review & scanning (Tier 4)
-- Collect all policies in all compartments (`IdentityClient.list_policies` per compartment).
-- Parse each statement into `PolicyStatement`: `subject` (group/dynamic-group/any-user/service, incl.
-  identity-domain qualifier), `verb` (`inspect|read|use|manage`), `resource` (type or family),
-  `location` (tenancy/compartment path), `conditions` (raw `where` clause + parsed vars),
-  plus `Define`, `Endorse`, `Admit` statement types.
-- The parser must be tolerant: unparseable statements become a LOW finding (`POLICY-PARSE-001`), not a crash.
-- Initial rule set (each rule gets a `docs/detections/<rule_id>.md` and unit tests):
-  - `manage all-resources in tenancy` granted to any group other than Administrators.
-  - Any `any-user` / `any-group` grant, especially without a `where` clause.
-  - `manage` on `users`, `groups`, `policies`, `dynamic-groups`, `domains` outside an IAM-admin group.
-  - Broad `Endorse`/`Admit` cross-tenancy statements (who can reach in/out of each tenancy).
-  - Dynamic groups with overly broad matching rules combined with `manage` grants.
-  - Policies attached at root that could be scoped to a compartment.
-  - CIS OCI Foundations Benchmark IAM controls (map rule → CIS control id in `cis_refs`).
-- Prior art worth reading (do not vendor): Oracle's CIS compliance script in the
-  `oracle-quickstart/oci-cis-landingzone-quickstart` repo.
+In an explicitly authorized non-production parent and child, demonstrate API key → parent-domain
+JWT → child WIF exchange → child `ogc` UPST → required read-only OCI calls. Confirm scanner
+operation/renewal using child confidential-client credentials, without child API keys, interactive
+login or refresh grants.
+Record scope, issuer/key relationships, subject mapping, exchange caller authorization, expiration
+and signing-key binding. Reject wrong principals, issuers, children, domains and expired assertions.
 
-### 7.4 Audit logs & anomalies (collection: Tier 1 · anomaly rules: Tier 5)
-- Sources: `AuditClient.list_events` (per compartment, per region) or Logging Search
-  (`LogSearchClient.search_logs`) against the tenancy's `_Audit` logs including subcompartments.
-  Prefer Logging Search for tenancy-wide queries; confirm query time-window limits in current docs
-  and chunk long ranges.
-- Audit retention is limited (default 365 days); for longer history, rely on a customer-configured
-  Service Connector → Object Storage export (read-only consumption by us).
-- Normalize only allow-listed `AuditEvent` fields, store with tenancy + region. No request/response
-  blobs or headers. Audit collection follows `docs/delta-fetching.md`: durable events before scoped
-  checkpoints, complete pagination, overlap/reconciliation and visible gaps. Daily summaries are for
-  trends; short-window rules query exact events using minute-level candidate indexes (collection §7).
-- Initial anomaly rules (deterministic first, statistical later):
-  - IAM changes: policy create/update/delete, user/group membership changes, API key / auth token /
-    customer secret key creation, MFA changes, identity domain settings.
-  - Security control tampering: Cloud Guard disable/target/recipe changes, Security Zone changes,
-    Audit retention change, logging/Service Connector deletion, Vault key schedule-deletion.
-  - Console sign-in failure bursts (only after source event coverage is verified); sign-ins from a source
-    IP / user agent never seen for that
-    principal (baseline per tenancy, with warmup/coverage requirements). Country scoring is deferred
-    until an approved geography source and privacy/dependency design exist.
-  - Activity in a region the tenancy normally doesn't use.
-  - Off-hours activity by privileged principals (configurable business hours / timezone per tenancy).
-  - Same principal or IP active across multiple child tenancies in a short window.
-- Every anomaly rule: `rule_id`, description, severity, required event types, tests with fixtures.
+Verify default-domain scanner access to users, groups and memberships across **existing and newly
+created domains**, with tenancy-level policies and no per-domain scanner setup. The administrator
+performs test provisioning separately; OGC only reads resources. Document exact missing permissions
+or API limitations as validation blockers rather than silently changing the design.
+
+### 7.2 Implement setup packages and manual guides
+
+Build parent and child Terraform packages with official pinned providers, deploy buttons,
+non-secret outputs and equivalent OCI Console instructions. Parent setup creates the scanner,
+application groups, initial human admin membership, read policies and dedicated login OIDC app.
+Child setup creates its service identity, local scan grants and trust. Neither deploys OGC itself.
+
+Validate formatting, provider schemas, expected plan contents and existing-resource handling.
+Keep the scanner private key outside Terraform and document secure OIDC-secret retrieval and
+state protection. Verify both setup methods produce the same prerequisites and no child API keys.
+
+### 7.3 Implement enrollment and human access
+
+Build the setup-password-protected first-run wizard, metadata collection, setup generation,
+credential upload/encryption and verification, and final `ogc_admin` OIDC sign-in. Reject concurrent
+or stale enrollment completion so only one active parent can be installed.
+
+Implement OIDC login, group-based route authorization, membership rechecks, session termination
+and admin-to-viewer downgrade. Test group management remains exclusively in OCI. Verify that
+OIDC access and credential repair work during scanner authentication failures. Discover children
+after parent enrollment and render them as Not configured until their own setup is verified.
+
+### 7.4 Implement child configuration and monitoring
+
+Implement Configure → default-domain GUID and verified metadata → Terraform/deploy-button or
+manual setup → Verify → automatic monitoring. Preserve an explicit distinction between invalid
+identity/authentication and individual dataset failures; partial access starts partial monitoring.
+
+Implement token acquisition/renewal, principal isolation, reviewed read-only SDK enforcement,
+bounded scheduling, per-scope coverage, scheduled recovery retries and pause/resume. Handle parent
+key invalidation, child trust removal and confirmed child departure without destroying history.
+Show persistent application failures and stale data; do not build external notification integrations.
+
+Implement the Scan tab, persistent daily/weekly calendar schedule and durable full-scan queue
+as specified in section 6.9 and `docs/scanning.md`. Extend the separate scanner with heartbeat,
+atomic claims, renewable leases, missed-run coalescing and interrupted-job recovery. Validate
+admin/viewer permissions, CSRF, calendar/DST boundaries, concurrent workers and replacement
+fences with offline regression tests.
+
+### 7.5 Implement safe parent replacement
+
+Reuse fresh enrollment screens for the replacement candidate without copying old secrets/settings.
+Require the current admin to initiate and the new parent's admin to complete. Keep old state intact
+until candidate verification succeeds. Fence old work, switch authentication/configuration and remove
+old server-held organization data, backups and exports. Test cancel/failure, concurrent operations,
+crash recovery and cleanup failures so data or credentials cannot cross the organization boundary.
+
+### 7.6 Collection, analysis and acceptance
+
+Collect inventory and governance data according to the reviewed collection tiers: Cloud Guard,
+Security Zones, Cloud Advisor, compartments, identity/policy inventory and regional Audit events.
+Build governance aggregation from verified stored records, preserving source identities and scoped
+finding resolution. Add Tier 4 policy rules and Tier 5 audit anomalies after prerequisite data and
+coverage exist. Analyzers never call OCI. Customer Endorse/Admit grants may be analyzed but are
+not generated or required for OGC access. Audit ingestion must remain durable and gap-aware.
+
+Test setup/enrollment, both application roles and role removal, all-domain reads, WIF renewal,
+partial recovery, pause/resume, credential/trust revocation, key replacement and organization cleanup.
+Use synthetic fixtures and mocked OCI clients for unit tests; live checks require an explicitly
+authorized non-production organization. Passing mocks does not certify OCI interoperability.
+Run applicable lint, type and test gates once application code and tooling exist again.
+
+### 7.7 Backlog and remaining specification review
+
+- **OGC application/hosting deployment**, including a full Resource Manager deployment stack.
+  The current stacks configure tenancy prerequisites only; hosting will be decided later.
+- **Multiple parent organizations in one installation**, with organization-specific login routing,
+  credentials, access boundaries, configuration and storage.
+- **Per-tenancy visibility restrictions** for application users; current viewers/admins see the
+  whole enrolled organization according to their application role.
+- **External administrator notifications**, such as email or another notification service.
+  Current failures are visible only inside OGC; notification delivery requires a separate integration.
+
+Reconcile the remaining sections, IAM templates and `docs/` as those areas are reviewed. Remove
+obsolete credential options, cross-tenancy access prerequisites and claims about deleted code.
+Until reconciled, these sections take precedence for the contracts listed at the start of §6.
 
 ---
 
@@ -346,7 +484,7 @@ Full design, sequence diagram and security requirements: **`docs/control-plane.m
 - No `print()` in library code — use the logger. CLI output via `rich`/typer helpers only.
 - Functions that call OCI take a client (or client factory) as a parameter → easy to mock.
 - Timestamps are timezone-aware UTC (`datetime.now(tz=UTC)`); store ISO-8601.
-- OCIDs are strings validated by a shared `Ocid` type in `models/`.
+- OCIDs are strings validated by a shared `Ocid` type in `models.py`.
 - Keep modules small and single-purpose; one collector per OCI service.
 - Docstrings on public functions: what it does, which OCI API(s) it calls, required IAM permission.
 
@@ -354,39 +492,32 @@ Full design, sequence diagram and security requirements: **`docs/control-plane.m
 
 ## 9. Commands
 
-> Agents must run the quality gates before declaring a task done.
+Agents must run these quality gates before declaring work done:
 
 ```bash
-# setup
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# quality gates (all must pass)
 ruff format --check .
 ruff check .
 mypy src
 pytest -m "not live"
-
-# live integration tests (opt-in; needs OCI credentials for a NON-PRODUCTION tenancy)
-pytest -m live
-
-# CLI
-osc admin bootstrap --tenancy-ocid <ocid> --scan-method cli_profile|api_key|instance_principal \
-    [--admin-method oidc --domain-url ... --client-id ... --client-secret-ocid ...] [--yes]
-osc admin recover            # finish/roll back an interrupted organization switch
-osc org discover | osc org show
-osc policies parent [--check] | osc policies child <ocid>
-osc child select|verify|activate <ocid>
-osc scan [--tier N] [--only <datasets>] [--tenancy <ocid>] [--no-audit]
-osc audit ingest | osc audit reconcile
-osc scheduler [--once]       # long-running collection process (separate from `osc web`)
-osc findings list [--status open|resolved|all]
-osc db purge | osc db backup <dir> | osc db restore <backup> [--expect-parent ...] [--main-db-only]
-osc web
-
-# CLI (planned, Tier 5)
-osc audit anomalies --since 24h
 ```
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+ogc encryption-key   # generate once; operator stores separately from data/backup
+ogc web              # HTTPS reverse proxy required; operator settings in README.md
+ogc scheduler        # separate process; observes organization/child changes
+ogc scheduler --once
+ogc scan --family identity|governance|audit|all
+ogc purge
+ogc setup-package parent /tmp/ogc-parent.zip
+ogc setup-package child /tmp/ogc-child.zip
+```
+
+Enrollment and parent replacement are web workflows, not host bootstrap commands.
+The runtime currently exposes Tier 1 only; do not advertise designed higher tiers as implemented.
 
 ---
 
@@ -401,12 +532,30 @@ osc audit anomalies --since 24h
 
 ---
 
-## 11. Open decisions (update as they are made)
+## 11. Historical decisions and pending review
+
+The new decisions in sections 6–7 supersede conflicting historical entries below. Current
+implementation status is in `docs/implementation/status.md`; checked items here may refer to deleted code.
 
 - [x] Deployment: **both** — `workstation` mode for dev/POC, `oci` mode (Compute instance principal) for production;
       Container Instance resource-principal support is gated on validated matching rules/auth. (2026-10-07)
 - [x] Users: **two roles**, `OSC-Admins` and `OSC-Viewers`, from identity-domain groups. (2026-10-07)
-- [x] Child access: **cross-tenancy only**, no per-child credentials. (2026-10-07)
+- [x] Child access: default cross-tenancy; optional **child-local delegated UPST scan connections**
+      replace the cross-tenancy-only restriction (2026-10-15, `docs/delegated-scans.md`).
+- [x] Onboarding UI and Verify follow the selected scan connection: delegated scans show local
+      prerequisites; parent-scanner Endorse/Admit requirements remain conditional
+      (`docs/delegated-scans.md`, 2026-10-15).
+- [x] Delegated authorization pages allow only their saved identity-domain origin in CSP
+      `form-action`; other pages stay local-only. Discovery endpoints compare host/effective HTTPS
+      port so explicit `:443` works (`docs/delegated-scans.md`, 2026-10-15).
+- [x] Delegated UPST identity binding uses `GetTenancy` + `GetUser(sub)` and the user's owning
+      tenancy on every exchange/renewal; no `res_tenant` claim is required. Added read-only `get_user`
+      under the existing local read grant (`docs/delegated-scans.md`, 2026-10-15).
+- [ ] Validate API-backed UPST binding against OCI, refresh lifetime and multi-domain read access
+      in a named non-production tenancy; mocked checks do not establish OCI authorization.
+- [x] Delegated scan implementation: schema v4 encrypted offline grants, admin OIDC authorization,
+      serialized refresh rotation, per-tenancy CLI/scheduler routing and restore invalidation
+      (`docs/delegated-scans.md`, 2026-10-15).
 - [x] Writes: **none — strictly read-only.** OSC displays required policies and checks them; humans
       apply them. (2026-10-07, replaces the earlier parent-side writer idea)
 - [x] Storage Phase 1: **SQLite only** on the OSC server; **90-day** default retention; future backends
@@ -443,6 +592,14 @@ osc audit anomalies --since 24h
       reconciliation sweeps (`docs/review-fixes.md`, 2026-10-09).
 - [ ] Verify them against OCI: capability gates Q1–Q6 need an authorized non-production tenancy;
       mocked tests do not certify OCI compatibility. Tiers 2–5 are designed but not built.
+- [x] Child trust impersonation rules match the parent `ogc` user's **username** (`sub eq ogc`),
+      not its SCIM ID or OCID; the parent package outputs `scanner_username` (2026-10-22).
+- [x] Token-exchange debug logging of bearer tokens is removed; tokens are always redacted and
+      no setting may disable redaction (2026-10-22, AGENTS.md §2).
+- [x] Audit cursors: forward catches up to the present each scan, reconciliation re-reads the 24h
+      before the previous forward checkpoint, backfill runs toward a fixed target with a per-scan
+      hour budget (`OGC_AUDIT_BACKFILL_HOURS`). `OGC_SETUP_PASSWORD` is at least 16 characters and
+      only failed unlocks count toward the setup throttle (2026-10-22).
 - [ ] **Backlog — multi-organization support** (several parents in one deployment). To decide: user
       isolation (users see only the org whose identity domain they signed in to, plus an "operator"
       org that sees all), adding orgs (CLI + web for global admins — preferred), org-scoped settings,

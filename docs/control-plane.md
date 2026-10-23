@@ -1,5 +1,14 @@
 # Control Plane — Design
 
+> **2026-10-22:** This page contains historical design/implementation details.
+> New enrollment/scanner contracts are in [AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
+> current code and release gates are in [implementation status](implementation/status.md).
+
+**2026-10-15 update:** [Delegated tenancy scans](delegated-scans.md) supersedes older statements
+that children never have connections or that refreshable UPST grants cannot run scheduled scans.
+It defines encrypted grant storage, lifecycle, routing and live acceptance gates.
+
+
 Status: **Design v0.4** (2026-10-08) · Owner: Kiran Thakkar
 Scope: connecting the **parent tenancy**, discovering **child tenancies** from the OCI Organization, and
 onboarding the children the admin selects. Read with `AGENTS.md` §2 (security principles) and §6.
@@ -10,7 +19,7 @@ Required contracts and current implementation gaps are tracked in [architecture 
 |---|----------|
 | R1 | **Deployment: both.** Workstation for development/POC; target production on OCI Compute instance principal. Container Instance resource-principal support needs validated matching rules/authentication before release (§2.3). |
 | R2 | **Users: small team, two roles.** `OSC-Admins` manage connections and onboarding; `OSC-Viewers` only see findings. |
-| R3 | **Child access: cross-tenancy only.** One scanner group (or dynamic group) in the parent; every child applies Admit policies. No per-child credentials. |
+| R3 | **Hybrid child access.** Parent cross-tenancy scanning remains the default for supported services; optional child-local delegated UPST connections provide IAM inventory. Configured connections fail closed without fallback. See `delegated-scans.md` (2026-10-15). |
 | R4 | **The tool is strictly read-only (revised).** OSC never creates, updates or deletes anything in any tenancy, parent or child. It **shows** every policy it needs, with copy, download and CLI options, and **checks read-only** whether each one is in place. Humans apply them. *(Replaces the earlier "parent-side policy writer" decision.)* |
 | R5 | **One organization per deployment** (2026-10-08). Replacement preflights the full configuration, drains work under an exclusive maintenance lease and advances a generation (§6.1). Previous active local data is removed and sessions end; the control-plane audit trail and retained backups follow their retention rules. Multi-organization support remains backlog. |
 
@@ -102,9 +111,13 @@ short-lived (about an hour) and gets re-exchanged when needed.
 OSC **shows** these prerequisites on the Organization screen as a checklist with OCI CLI commands (§5.1).
 It does not create them (R4).
 
-### 2.3 Interactive tokens can't run background scans
-A UPST belongs to a signed-in human and expires. Scheduled scans use a **scan identity**, chosen by
-deployment mode:
+### 2.3 Default scanner and delegated grants
+The default scanner is chosen by deployment mode. Parent web-login tokens are not used by the
+scheduler. A separate `delegated_scan` connection can be configured per tenancy in either mode; it
+uses encrypted offline refresh grants and UPST renewal, with explicit reauthorization on expiry or
+revocation. See [delegated scans](delegated-scans.md).
+
+Default deployment identities:
 
 | `OSC_DEPLOYMENT` | Scan identity | Admin sign-in |
 |---|---|---|
@@ -118,8 +131,9 @@ select a dynamic-group policy for a service-user signer. Container resource-prin
 also needs validated matching rules and authentication evidence before it is advertised as supported.
 
 ### 2.4 Joining an Organization doesn't grant access to the child
-Being the parent lets you **list** children, but gives no IAM access **inside** them. Each child needs the
-Define/Admit statements from §5.2. The child list shows an onboarding status per child.
+Being the parent lets you **list** children, but gives no IAM access **inside** them. Cross-tenancy
+services need the Define/Admit statements from §5.2. Child IAM inventory uses a delegated child-local
+connection. The child list shows onboarding status; grant status and per-dataset coverage are separate.
 
 ### 2.5 Group identity for Endorse/Admit
 - The parent's `Endorse` uses the group **name**. Groups outside the Default domain are domain-qualified:
@@ -132,7 +146,8 @@ Define/Admit statements from §5.2. The child list shows an onboarding status pe
 
 ### 2.6 Region and API capability checks
 
-Compare the parent and child's READY subscriptions before scheduling regional collectors. Record the
+For cross-tenancy requests, compare the parent and child's READY subscriptions before scheduling
+regional collectors. A delegated local scanner uses its own subscribed regions independently. Record the
 child home region, Cloud Guard reporting region and each audit region independently. Missing shared
 subscriptions remain explicit coverage gaps; OSC never subscribes a region or silently reduces the
 expected child region set. Parent IAM admins handle subscription changes manually.
@@ -222,6 +237,10 @@ docs before release (AGENTS.md §6). Organization family verification is recorde
 
 ### 5.1 Organization configuration screen — everything OSC needs in the **parent** tenancy
 
+The screen separates admin sign-in, default parent scanner and delegated parent scanning. The
+prerequisites below apply to admin sign-in and the default scanner, not to a delegated user's local
+grant. See [delegated onboarding screens](delegated-scans.md#onboarding-screens).
+
 **(a) Identity domain prerequisites** (checklist, not policies; needed for method A):
 
 | Item | Check |
@@ -253,18 +272,27 @@ Allow dynamic-group <OSC-Scanner-DG> to read organizations-family in tenancy
 Allow group <OSC-Scanners> to read all-resources in tenancy
 Allow group <OSC-Scanners> to read organizations-family in tenancy
 ```
-Only the block for the active deployment mode is shown. `OSC-Viewers` need **no** OCI permissions; they only
+Only the block for the active deployment mode is shown. Scanner grants are omitted when the parent
+and all selected children use delegated connections; admin grants remain for discovery and checks.
+`OSC-Viewers` need **no** OCI permissions; they only
 read OSC's own database.
 
 **(c) Combined Endorse policy `osc-endorse-children`** — a roll-up of every child's parent-side statements
-from §5.2(a), so the parent admin can apply one policy instead of one per child. Shows which children are
-included and flags any child whose lines are missing.
+from §5.2(a) for children using the parent scanner, so the parent admin can apply one policy instead
+of one per child. Delegated children require no parent-scanner endorsement. Explicitly enabled
+optional admin browsing is independent of delegated scanning.
 
 ### 5.2 Child configuration screen — one child
 
 Header: child name, OCID, alias (editable, default `osc_<sanitized name>`), onboarding status.
 Tenancy aliases are unique across the local registry. Generated aliases get a numeric suffix when the
 default is already in use; the configured parent alias follows the same rule.
+
+Delegated scanning is the primary setup action and displays grant status. A configured delegated
+connection hides the parent-scanner policy setup, including when authorization is pending or revoked.
+Child Verify checks root-policy readability without requiring Admit grants or looking up parent
+groups. Without a delegated connection, the following templates appear under a separate **Parent
+scanner** section for supported cross-tenancy services; child IAM inventory needs delegated access.
 
 **(a) Parent tenancy: Endorse** — goes into `osc-endorse-children` (or a separate policy, admin's choice):
 ```
@@ -335,7 +363,9 @@ policy check into complete coverage.
   the required explicit SDK allow-list and bypass tests are defined in [architecture §3](architecture.md).
 - **OIDC hygiene:** Authorization Code + **PKCE (S256)**, `state` and `nonce` checked, ID token checked
   against JWKS (`iss`, `aud`, `exp`, `iat`, `nonce`). Library: `authlib`.
-- **Tokens stay server-side.** Access/refresh tokens and UPSTs live only in the encrypted server session store;
+- **Tokens stay server-side.** Web-login tokens live in the encrypted server session store; delegated
+  scan access/refresh tokens live separately in encrypted `delegated_grants`. UPST and its ephemeral
+  signing key are memory-only. Web-session expiry/logout does not disconnect a delegated grant;
   the browser gets an opaque `HttpOnly`, `Secure`, `SameSite=Lax` cookie with a short idle timeout
   (`OSC_SESSION_IDLE_MINUTES`, 30) and an absolute lifetime (`OSC_SESSION_MAX_HOURS`, 12). Sessions without a
   signed-in user expire after 10 minutes and are only created for the sign-in page; expired rows are pruned.

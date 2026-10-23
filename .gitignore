@@ -19,3 +19,6 @@ __pycache__/
 *.key
 .env.*
 !.env.example
+
+# OGC encrypted runtime state, audit files and managed artifacts
+.ogc/

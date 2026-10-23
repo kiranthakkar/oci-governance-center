@@ -1,18 +1,23 @@
 # GOV-CG-001 — Cloud Guard not enabled
 
-Version: 1 (2026-10-09). Status: implemented (Tier 1). Source: governance. Severity: HIGH. No CIS mapping.
+Version: 1 (2026-10-22). Status: implemented (Tier 1). Source: governance. Severity: HIGH.
+No CIS mapping. Code: `analyzers.governance`; lifecycle in `Service.findings`.
 
 Purpose: a tenancy without Cloud Guard has no detector of record; its problems and Security Zone
-violations are invisible. Input: `cloud_guard.configuration` (`CloudGuardClient.get_configuration`,
-home region): status, reporting region.
+violations are invisible.
 
-Trigger: a complete configuration snapshot whose status is not `ENABLED` (including unknown).
-Identity: generation, tenancy, rule, subject `cloud_guard`. Evaluation scope: the tenancy-wide
-`cloud_guard.configuration` scope.
+Input: dataset `cloud_guard.configuration`, read with `CloudGuardClient.get_configuration` in the
+tenancy's home region and projected to `status` and `reporting_region`.
 
-Resolution: a later complete configuration snapshot with status `ENABLED`. A failed or partial read
-never resolves it; it raises `OSC-ACCESS-002` for the configuration scope instead. While Cloud Guard is
-disabled, `cloud_guard.problems` and `security_zones.zones` are shown as not applicable (rows kept).
+Trigger: a complete configuration snapshot whose `status` is not `ENABLED`, including a missing or
+unknown status. Identity: SHA-256 of `["v1", tenancy, "cloud_guard.configuration", tenancy,
+"GOV-CG-001"]`. Evaluation scope: the tenancy-wide `cloud_guard.configuration` scope.
 
-Tests: `tests/unit/test_collectors.py` (disabled child raises; enabling resolves; enabled parent never
-raises). Limitations: status only; detector/target coverage is Tier 2 (`GOV-CG-002/003`).
+Resolution: a later complete snapshot of the same scope that no longer triggers sets `status=resolved`
+and `resolved_at`. A failed read never resolves the finding; it raises `OGC-ACCESS-002` for the
+configuration scope and keeps the previous snapshot. When the configuration read fails, problems and
+Security Zones are not attempted in that cycle.
+
+Tests: `tests/unit/test_jwt_and_analysis.py::test_positive_and_negative_governance_rules` and
+`tests/unit/test_service.py`. Limitations: status only; detector/target coverage is Tier 2
+(`GOV-CG-002/003`, planned).

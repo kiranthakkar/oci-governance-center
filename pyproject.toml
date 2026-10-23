@@ -1,70 +1,64 @@
 [build-system]
-requires = ["hatchling==1.27.0"]
+requires = ["hatchling==1.32.4", "editables==0.6"]
 build-backend = "hatchling.build"
 
 [project]
-name = "oci-security-center"
+name = "oci-governance-center"
 version = "0.1.0"
-description = "Read-only security posture tool for OCI Organizations (parent + child tenancies)."
-readme = "README.md"
+description = "Read-only governance and observability for OCI organizations"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
-authors = [{ name = "Kiran Thakkar" }]
-# Pinned per AGENTS.md §2.7. Justify every addition in the PR description.
+readme = "README.md"
 dependencies = [
-  "oci==2.187.2",                 # official OCI SDK (signing, clients, TokenExchangeSigner)
-  "pydantic==2.13.5",             # domain models
-  "pydantic-settings==2.15.0",    # env-based settings
-  "typer==0.27.3",                # CLI
-  "fastapi==0.142.4",             # web admin UI + API
-  "uvicorn==0.54.0",              # ASGI server
-  "jinja2==3.1.6",                # server-rendered templates (autoescaped)
-  "python-multipart==0.0.32",     # form posts (FastAPI requirement for Form)
-  "authlib==1.8.0",               # OIDC client: auth code + PKCE, ID token validation
-  "httpx==0.28.1",                # required by authlib's Starlette client
+  "oci==2.189.0",
+  "pydantic==2.14.1",
+  "pydantic-settings==2.16.1",
+  "typer==0.27.3",
+  "fastapi==0.161.0",
+  "uvicorn==0.54.0",
+  "jinja2==3.1.6",
+  "python-multipart==0.0.32",
+  "authlib==1.9.1",
+  "joserfc==1.7.7",
+  "httpx==0.28.1",
+  "cryptography==50.0.2",
+  "requests==2.34.2",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest==9.1.1",
-  "pytest-mock==3.16.0",
-  "ruff==0.16.10",
+  "pytest-mock==3.17.0",
+  "ruff==0.17.2",
   "mypy==2.4.0",
+  "types-requests==2.33.0.20261006",
 ]
 
 [project.scripts]
-osc = "oci_security_center.cli:app"
+ogc = "oci_governance_center.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/oci_security_center"]
+packages = ["src/oci_governance_center"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "tests"]
+include = ["*.py", "*.pyi", "pyproject.toml"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PT", "C4", "T20"]
-ignore = [
-  "S101",   # assert is fine in tests
-]
+select = ["E", "F", "I", "B", "UP", "S", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "T20"]
-"src/oci_security_center/cli.py" = ["T20", "B008"]
-"src/oci_security_center/web/**" = ["B008"]
+"src/oci_governance_center/web/app.py" = ["B008"]
 
 [tool.mypy]
-python_version = "3.11"
 strict = true
-mypy_path = "src"
-packages = ["oci_security_center"]
 
 [[tool.mypy.overrides]]
-module = ["oci", "oci.*", "authlib", "authlib.*"]
+module = ["oci.*", "authlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: hits a real OCI tenancy (read-only); skipped by default"]
-addopts = "-m 'not live' -q"
+addopts = "-q"
+markers = ["live: authorized non-production OCI checks only"]

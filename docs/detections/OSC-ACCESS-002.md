@@ -1,3 +1,5 @@
+> **Superseded (2026-10-22)** by [OGC-ACCESS-002](OGC-ACCESS-002.md). Kept as historical design input.
+
 # OSC-ACCESS-002 — Source not collected
 
 Version: 1 (2026-10-09). Status: implemented (collection runner and audit coordinator). Source: coverage. Severity: HIGH. No CIS mapping.

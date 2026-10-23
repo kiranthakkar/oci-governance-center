@@ -1,3 +1,7 @@
+> **Historical (2026-10-22).** This rule belonged to the removed OSC implementation and is not
+> implemented in OGC. OGC no longer generates Endorse/Admit grants, so a replacement access-policy
+> check needs a new design before it is assigned an `OGC-` ID.
+
 # OSC-ACCESS-001 — Access policy coverage
 
 Version: 1 (2026-10-08). Source: coverage. Severity: HIGH. No CIS mapping.
