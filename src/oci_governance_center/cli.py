@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import threading
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 import uvicorn
@@ -68,14 +69,33 @@ def scheduler(once: bool = False) -> None:
     """Run collection separately; never start it in web workers."""
     settings, service = runtime()
     worker = ScanWorker(service)
+    stop = threading.Event()
+
+    def request_stop(*_: Any) -> None:
+        # First signal: stop at the next safe point (after the current OCI request) and mark the
+        # job interrupted. Second signal: mark it interrupted, release this worker's tenancy
+        # locks and exit at once. Messages go straight to stderr: logging is not re-entrant.
+        if stop.is_set():
+            os.write(2, b"Second stop signal; exiting immediately\n")
+            try:
+                worker.abandon()
+            finally:
+                os._exit(130)
+        os.write(
+            2,
+            b"Stopping: the current scan ends after its current OCI request. "
+            b"Press Ctrl-C again to exit immediately.\n",
+        )
+        stop.set()
+        service.stopping.set()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
     if once:
         generation = service.store.state()[0]
         ScanControl(service.store).enqueue(generation, "cli", "cli")
         worker.run_once()
         return
-    stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
     worker.run(stop)
 
 

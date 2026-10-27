@@ -96,9 +96,11 @@ higher tier today collects Tier 1 only.
 
 `cost.monthly` (2026-10-27) is read once per scan from the **parent** with
 `UsageapiClient.request_summarized_usages` (MONTHLY, COST, current month plus 11 previous, grouped by
-`tenantId`, `tenantName`, `service`, `compartmentId`, `compartmentPath`, `compartment_depth=7`). It
-keeps month, tenant ID and name, service, compartment ID and path, computed amount and currency; no
-resource IDs or tags. Requires `read usage-report` in the parent only.
+`tenantId`, `service`, `compartmentId`, `compartmentPath`, `compartment_depth=6`; the API accepts at
+most four groupBy keys, so tenancy names come from OGC's tenancy list). It keeps month, tenant ID,
+service, compartment ID and path, computed amount and currency; no
+resource IDs or tags. Requires `read usage-report` in the parent only. Depth is limited to 6
+(root is depth 1); costs below that depth are aggregated into their depth-6 ancestor.
 
 `identity_domains.*` datasets are read from each tenancy's default identity domain unless the
 tenancy's collection settings enable all domains; Cloud Guard, Cloud Advisor, identities,

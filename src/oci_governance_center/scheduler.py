@@ -11,8 +11,8 @@ from typing import Any
 
 from .diagnostics import PublicFailure, safe_reason
 from .models import now
-from .scans import ScanControl
-from .service import Service
+from .scans import STOPPED, ScanControl
+from .service import Cancelled, Service
 from .storage import StaleWork
 
 logger = logging.getLogger(__name__)
@@ -32,10 +32,16 @@ class ScanWorker:
         generation = int(job["generation"])
         logger.info("Scan %s started (trigger=%s)", job["id"], job["source"])
         status, message = "completed", ""
+        self.service.cancelled.clear()
         try:
             self.service.scan("all", expected_generation=generation)
+            # Audit has not run yet, so a stop requested by now leaves the scan unfinished.
+            self.service.check_stop()
             logger.info("Scan %s: inventory and governance finished; collecting Audit", job["id"])
             self.service.scan("audit", expected_generation=generation)
+            # Only a tenancy that actually ended early makes a finished scan "interrupted".
+            if self.service.cancelled.is_set():
+                raise Cancelled("Scanner stop requested")
             current, parent, blocked = self.service.store.state()
             if current != generation or parent is None:
                 raise StaleWork("Organization changed")
@@ -46,6 +52,16 @@ class ScanWorker:
             if failed:
                 status = "partial"
                 message = f"{len(failed)} collection scopes have incomplete coverage; see Coverage."
+        except Cancelled:
+            # Committed data and Audit progress are kept; the next scan continues from there.
+            # A parent-key failure confirmed during the run is still reported as such.
+            if self.service.store.state()[2]:
+                status = "failed"
+                message = "Parent scanner credentials failed; collection is stopped."
+            else:
+                status = "interrupted"
+                message = STOPPED
+            logger.info("Scan %s stopped on operator request", job["id"])
         except StaleWork:
             logger.info("Scan %s stopped because the organization changed", job["id"])
             return  # Replaced organizations cannot finish or publish jobs in the new generation.
@@ -57,6 +73,10 @@ class ScanWorker:
             logger.info("Scan %s finished (status=%s)", job["id"], status)
         except StaleWork:
             return
+
+    def abandon(self) -> None:
+        """On forced exit, mark this worker's running job interrupted and release its locks."""
+        self.control.abandon(self.owner)
 
     def run_once(self) -> bool:
         """Drain one queued or due job; useful for one-shot execution and deterministic tests."""

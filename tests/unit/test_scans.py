@@ -338,3 +338,64 @@ def test_scan_tab_explains_waiting_for_tenancy_locks(settings, service, parent, 
     page = client.get("/scans").text
     assert "Waiting for an earlier scan to release its tenancy locks" in page
     assert "UTC" in page
+
+
+def test_stop_request_marks_the_running_job_interrupted(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    worker = ScanWorker(service)
+    worker.control.enqueue(generation, "admin")
+    calls = []
+
+    def scan(family, expected_generation=None):
+        calls.append(family)
+        service.stopping.set()  # operator pressed Ctrl-C during inventory
+
+    monkeypatch.setattr(service, "scan", scan)
+    assert worker.run_once()
+    assert calls == ["all"]  # Audit is not started after a stop request
+    job = worker.control.jobs(generation)[0]
+    assert job["status"] == "interrupted" and "stopped by the operator" in job["error"]
+
+
+def test_stop_after_a_finished_scan_keeps_its_real_status(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    worker = ScanWorker(service)
+    worker.control.enqueue(generation, "admin")
+
+    def scan(family, expected_generation=None):
+        if family == "audit":
+            service.stopping.set()  # signal arrives after every tenancy finished Audit
+
+    monkeypatch.setattr(service, "scan", scan)
+    assert worker.run_once()
+    assert worker.control.jobs(generation)[0]["status"] == "completed"
+
+
+def test_stop_during_a_key_failure_reports_the_key_failure(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    worker = ScanWorker(service)
+    worker.control.enqueue(generation, "admin")
+
+    def scan(family, expected_generation=None):
+        service.store.block(generation, True)
+        service.stopping.set()
+
+    monkeypatch.setattr(service, "scan", scan)
+    assert worker.run_once()
+    job = worker.control.jobs(generation)[0]
+    assert job["status"] == "failed" and "credentials failed" in job["error"]
+
+
+def test_forced_exit_interrupts_the_job_and_releases_its_locks(service, parent):
+    generation = install(service.store, parent)
+    worker = ScanWorker(service)
+    worker.control.enqueue(generation, "admin")
+    worker.control.claim(generation, worker.owner)
+    assert service.store.lease(generation, "tenancy-lock", f"{worker.owner}:task")
+    assert service.store.lease(generation, "other-lock", "another-process:task")
+    worker.abandon()
+    job = worker.control.jobs(generation)[0]
+    assert job["status"] == "interrupted" and "stopped by the operator" in job["error"]
+    with service.store.db() as db:
+        owners = [row[0] for row in db.execute("SELECT owner FROM leases")]
+    assert owners == ["another-process:task"]

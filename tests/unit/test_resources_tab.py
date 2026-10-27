@@ -139,6 +139,9 @@ def test_policy_statement_counts_per_compartment_and_hierarchy(service, organiza
         [("p-prod", ["c", "d", "e"], "ACTIVE"), ("p-gone", ["x"], "DELETED")],
     )
     publish_policies(store, generation, root, "c-apps", [("p-apps", ["f"], "ACTIVE")])
+    for ident in ("c-db", "c-dev", "c-lost"):
+        publish_policies(store, generation, root, ident, [])
+
     records = views.records_by_dataset(store.rows("records", generation))
     view = views.compartment_tree(records, store.rows("coverage"), root, "Parent")
     tree = view["tree"]
@@ -165,3 +168,41 @@ def test_policy_counts_are_hidden_when_incomplete_or_disabled(service, organizat
     assert "— policy statements" in page
     store.save_scan_settings(generation, root, ScanSettings(policies=False), "admin")
     assert "Policy collection is disabled" in client.get("/resources").text
+
+
+def test_missing_compartment_policy_read_is_unknown_not_zero(service, organization):
+    client, generation, root, _ = organization
+    publish_policies(service.store, generation, root, root, [("root", ["a"], "ACTIVE")])
+    view = views.compartment_tree(
+        views.records_by_dataset(service.store.rows("records", generation)),
+        service.store.rows("coverage"),
+        root,
+        "Parent",
+    )
+    assert view["policy_state"] == "incomplete"
+    assert view["tree"]["children"][2]["own"] is None
+    assert "Policy collection is incomplete" in client.get("/resources").text
+
+
+def test_orphan_and_descendants_have_unknown_hierarchy_counts(service, organization):
+    client, generation, root, _ = organization
+    scope = Scope(tenancy=root, dataset="identity.compartments", region="us-ashburn-1")
+    old = [
+        compartment("orphan", "unknown-parent", "Orphan"),
+        compartment("descendant", "orphan", "Below orphan"),
+    ]
+    service.store.publish(generation, Batch(scope=scope, records=old))
+    for ident in (root, "orphan", "descendant"):
+        publish_policies(service.store, generation, root, ident, [(ident, ["a"], "ACTIVE")])
+    view = views.compartment_tree(
+        views.records_by_dataset(service.store.rows("records", generation)),
+        service.store.rows("coverage"),
+        root,
+        "Parent",
+    )
+    orphan = view["tree"]["children"][0]
+    assert view["policy_state"] == "complete"
+    assert orphan["own"] == 1 and orphan["hierarchy"] is None
+    assert orphan["children"][0]["own"] == 1
+    assert orphan["children"][0]["hierarchy"] is None
+    assert "Hierarchy unavailable" in client.get("/resources").text

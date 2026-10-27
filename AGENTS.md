@@ -406,6 +406,12 @@ Tenancy collection leases last 600 s and are renewed every 60 s while a scan run
 are tagged with the scanner worker's identity, so when a crashed or restarted worker's job is
 marked interrupted its tenancy leases are released and a queued scan starts within about two
 minutes. While a queued scan waits for earlier locks, the Scan tab says when it will start.
+Stopping `ogc scheduler` (with or without `--once`; Ctrl-C or SIGTERM) ends the running scan
+after its current OCI request, keeping everything committed. Analysis still runs and fails closed
+on inputs not read. The job is marked interrupted only if work actually ended early; a parent-key
+failure is still reported as such. A second signal marks the job interrupted, releases this
+worker's tenancy locks and exits immediately. Long Audit
+ranges log progress every 24 hours of history (2026-10-27).
 
 Collection settings are per tenancy (`docs/scanning.md`); the default reads only the tenancy's
 default identity domain. `ogc_admin` may **ignore**, **mark closed** or **reopen** any finding,
@@ -674,11 +680,11 @@ implementation status is in `docs/implementation/status.md`; checked items here 
       2026-10-23), SCIM MFA/federation/sign-in attributes and `ListCategories` names, in a named
       tenancy.
 - [x] Cost visibility: dataset `cost.monthly` from the parent's Usage API (`request_summarized_usages`,
-      MONTHLY, COST, 12 months, grouped by tenant, service, compartment ID and path); parent-only
+      MONTHLY, COST, 12 months, grouped by tenant ID, service, compartment ID and path; the API allows at most four groupBy keys, so tenancy names come from OGC); parent-only
       grant `read usage-report`; Cost tab by tenancy, service and compartment (rolled up); a Cost
       switch on the parent's collection settings, on by default (2026-10-27).
 - [ ] Cost live gates: the parent's Usage API returns child tenancies; `compartmentPath` format and
-      `compartment_depth=7`; paging; `read usage-report` alone is sufficient.
+      `compartment_depth=6`; paging; `read usage-report` alone is sufficient.
 - [ ] **Backlog — multi-organization support** (several parents in one deployment). To decide: user
       isolation (users see only the org whose identity domain they signed in to, plus an "operator"
       org that sees all), adding orgs (CLI + web for global admins — preferred), org-scoped settings,
@@ -696,3 +702,13 @@ implementation status is in `docs/implementation/status.md`; checked items here 
 - When unsure about an OCI API's behavior, limit, or permission name, check the current OCI
   documentation / SDK reference rather than guessing, and note the source in a code comment.
 - Update §11 and the relevant `docs/` page when a decision is made.
+
+### Review corrections (2026-10-27)
+
+Policy counts require successful policy coverage for the tenancy root and every expected active
+compartment, plus complete compartment discovery. A missing scope is unknown, never zero. Orphan
+compartments may show collected own statements, but hierarchy totals stay unavailable for them
+and their descendants until all ancestors are known. Deleted compartments without policy coverage
+also show unknown counts. Cost queries use Usage API depth 6 (root depth 1); deeper costs are
+aggregated into depth-6 ancestors. Cost totals group by tenancy OCID, keeping equal display names
+separate. Labels do not establish tenancy identity.

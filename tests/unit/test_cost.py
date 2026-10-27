@@ -53,14 +53,9 @@ def test_request_covers_twelve_whole_months_at_midnight_utc(domain, usage_api):
     assert details.time_usage_ended == datetime(2026, 4, 1, tzinfo=UTC)
     assert details.granularity == "MONTHLY" and details.query_type == "COST"
     assert details.tenant_id == domain.tenancy_ocid
-    assert details.group_by == [
-        "tenantId",
-        "tenantName",
-        "service",
-        "compartmentId",
-        "compartmentPath",
-    ]
-    assert details.compartment_depth == 7
+    assert details.group_by == ["tenantId", "service", "compartmentId", "compartmentPath"]
+    assert details.compartment_depth == 6
+    assert len(details.group_by) <= 4  # OCI: "Number of groupBy key is over 4"
 
 
 def test_window_crosses_year_boundaries():
@@ -262,3 +257,19 @@ def test_other_tabs_do_not_load_cost_rows(service, cost_page):
     _, generation, _ = cost_page
     assert service.store.records(generation, exclude=("cost.",)) == []
     assert len(service.store.records(generation, include=("cost.",))) == 7
+
+
+def test_same_name_tenancies_keep_separate_costs(service, cost_page):
+    _, generation, parent_id = cost_page
+    data = views.cost(
+        views.records_by_dataset(service.store.records(generation, include=("cost.",))),
+        service.store.rows("coverage"),
+        [(parent_id, "Same name"), (CHILD, "Same name")],
+        {"tenancy": "", "service": "", "month_from": "2026-03", "month_to": "2026-03", "q": ""},
+        "tenancy",
+        parent_id,
+    )
+    by_id = {row["tenant_id"]: row for row in data["rows"]}
+    assert by_id[parent_id]["name"] == by_id[CHILD]["name"] == "Same name"
+    assert by_id[parent_id]["amount"] == {"USD": 55.0}
+    assert by_id[CHILD]["amount"] == {"USD": 20.0, "EUR": 3.0}
