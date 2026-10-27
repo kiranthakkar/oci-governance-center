@@ -3,6 +3,8 @@
 > **2026-10-22:** This page contains historical design/implementation details.
 > New enrollment/scanner contracts are in [AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
 > current code and release gates are in [implementation status](implementation/status.md).
+> Actual OGC tables, retention and recovery limits are in the [operator guide](operations.md#local-storage-and-maintenance);
+> the backup/restore commands and schemas below are not current runtime capabilities.
 
 **2026-10-15 update:** [Delegated tenancy scans](delegated-scans.md) supersedes older statements
 that children never have connections or that refreshable UPST grants cannot run scheduled scans.

@@ -4,7 +4,8 @@ Read-only governance and observability for one OCI parent organization and its c
 
 This is a new implementation of the enrollment and scanner design in
 [AGENTS.md sections 6–7](AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust).
-The previous implementation has been removed.
+The previous implementation has been removed. See the [documentation index](docs/README.md)
+and [operator guide](docs/operations.md) for current setup, settings and troubleshooting.
 
 ## Implemented
 
@@ -13,11 +14,15 @@ The previous implementation has been removed.
 - Parent default-domain `ogc_viewer` / `ogc_admin` authorization, five-minute membership checks,
   checks before configuration changes, and session downgrade/revocation.
 - Organization discovery, child default-domain configuration, API-key → parent JWT → child UPST
-  exchange, and worker-local token renewal. Children use confidential-app client credentials for exchange and have no API keys.
+  exchange, and worker-local token renewal. Children use confidential-app client credentials for
+  exchange and have no API keys.
 - Separate bounded collection scheduler: IAM/domain inventory, Cloud Guard, Security Zones,
   Cloud Advisor, regional Audit ingestion, historical backfill and rolling reconciliation.
-- Tabs: Overview, Coverage, Cloud Guard, Cloud Advisor, Resource organization (compartment tree),
+- Tabs: Overview, Coverage, Cloud Guard, Cloud Advisor, Cost, Resource organization (compartment
+  tree and policy statement counts),
   Identity (users, groups, dynamic groups, policies, policy analysis), Activity, Scan, Configuration.
+- Per-tenancy collection settings, daily/weekly schedules, scan diagnostics and finding triage.
+- Monthly cost by tenancy/service/compartment from the parent Usage API.
 - Normalized JSON exports, snapshot change history,
   encrypted credentials and server sessions, and local retention.
 - Partial collection recovery, pause/resume, key repair, confirmed child-departure handling,
@@ -25,7 +30,7 @@ The previous implementation has been removed.
 
 **OCI compatibility is not yet certified.** Python tests use synthetic data and mock remote calls;
 parent/child Terraform packages have passed validation against the pinned official provider.
-Live WIF caller authorization, scopes, all-domain reads, group completeness, human Me/group access,
+Live WIF caller authorization, scopes, all-domain reads, group completeness, human Asserter access,
 provisioning behavior and volume limits still need an authorized non-production organization.
 See [implementation status and release gates](docs/implementation/status.md).
 Tier 4 policy and identity analysis is enabled; Tier 2 guardrail collectors and Tier 5 anomaly
@@ -87,9 +92,9 @@ See [scan controls and scheduling](docs/scanning.md) for recovery and daylight-s
 
 Open the public URL, enter the setup password, and follow the enrollment wizard. Apply the parent
 setup as a tenancy administrator, provide the scanner and OIDC credentials, and finish with an
-`ogc_admin` sign-in. Configure each discovered child with its default-domain URL and confidential-app client ID/secret;
-OGC discovers
-the domain identifiers, home region and service user named `ogc`. Failed scanner authentication does
+`ogc_admin` sign-in. Configure each discovered child with its default-domain URL and confidential-app
+client ID/secret; OGC discovers the domain identifiers, home region and service user named `ogc`.
+Failed scanner authentication does
 not prevent OIDC login or viewing historical data.
 
 ## Setup packages and Resource Manager
@@ -103,7 +108,9 @@ Both ZIPs contain Terraform JSON, a Resource Manager schema, and setup instructi
 IAM prerequisites only; they do not deploy the OGC application. Run Terraform/Resource Manager as
 an authorized administrator in the target tenancy. OGC never applies the configuration itself.
 Generate the parent scanner key pair locally and pass only its PUBLIC key to Terraform. Supply the
-private key to OGC over HTTPS after provisioning. Treat OIDC application Terraform state as sensitive.
+private key to OGC over HTTPS after provisioning. Treat both parent-login and child-exchange application Terraform state as sensitive.
+For a parent subject of `ogc`, the child trust rule must be `sub eq ogc` without quotes.
+See [child setup and credentials](docs/operations.md#child-setup-and-credential-separation).
 
 For a direct **Deploy to Oracle Cloud** button, publish immutable parent and child ZIPs to a
 Resource Manager-supported location and set `OGC_PARENT_PACKAGE_URL` / `OGC_CHILD_PACKAGE_URL`.
@@ -115,7 +122,8 @@ It never emits a deploy link pointing to a nonexistent public package.
 `OGC_DATA_ROOT/ogc.db` stores application state, coverage, normalized inventory and findings.
 Credentials, enrollment candidates and server-side sessions are encrypted using Fernet.
 Audit events live under `audit/g<N>/<hashed-tenancy>/<YYYY-MM>.db` and are committed before
-interval receipts/checkpoints. Runtime directories are private. Retention defaults to 90 days;
+interval receipts/checkpoints. Only credential/session payloads are encrypted, not all inventory
+in SQLite. Runtime directories are private. Retention defaults to 90 days;
 local control events use 365 days. Parent replacement removes the previous organization's control
 history as well as inventory, findings, audit, credentials, sessions, managed backups and exports.
 Key repair preserves organization history and fences existing workers/sessions.
@@ -192,3 +200,18 @@ trusted identity-domain JWKS endpoint. This supports domains that disallow anony
 reads. Logs distinguish code exchange, signing-key retrieval, local access-token validation, and
 Asserter authorization. An omitted token-response `scope` field is reported as omitted; it is not
 interpreted as an empty permission grant. ID-token presence is not checked or required.
+
+
+## Understanding partial scans
+
+A finished scan can have **Partial** coverage. Open **Scan → View scan details** or filter
+**Coverage** to incomplete scopes. `OGC-ACCESS-002` flags collection gaps; it is not itself proof
+of a security violation. Unfinished Audit backfill currently uses this flag too: “history is still
+being collected through” describes successful progress, not a read denial. The default backfill
+budget is now 168 hours per region per scan; current Audit events are collected separately.
+
+Finding triage (Ignore, Mark closed, Reopen) is local to OGC and restricted to `ogc_admin`.
+See [scanning and triage](docs/scanning.md) and [troubleshooting](docs/operations.md#troubleshooting-and-recovery).
+
+The former `OGC_DEBUG_TOKEN_EXCHANGE` setting has been removed. Current logs redact tokens;
+raw bearer tokens and request payloads are not exposed in the UI.

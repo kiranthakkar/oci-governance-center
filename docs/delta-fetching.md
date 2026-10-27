@@ -1,5 +1,10 @@
 # Audit ingestion and delta recovery
 
+> **Historical OSC design.** The implementation names and commands below refer to removed code.
+> Current OGC uses forward/reconciliation/backfill checkpoints described in
+> [scanning](scanning.md) and [implementation status](implementation/status.md#audit-progress-and-shutdown).
+> Use the [operator guide](operations.md), not this page, for recovery instructions.
+
 Status: Required design, 2026-10-08; implemented 2026-10-09 in `collection/audit.py` and
 `SqliteDataStore.commit_interval` with mocked tests. Source limits, delivery latency and event-ID
 uniqueness (gate Q2) and capacity (Q3) still need an authorized non-production tenancy.

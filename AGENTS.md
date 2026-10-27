@@ -89,7 +89,7 @@ This is a security tool with read access to an entire Organization. Treat it lik
 | Data models | `pydantic` v2 |
 | CLI | `typer` |
 | Web admin UI + API | `FastAPI` + server-rendered Jinja2 templates, no JS framework (strict CSP) |
-| OIDC client | `authlib` (Authorization Code + PKCE, ID-token validation) |
+| OIDC client | `authlib` (Authorization Code + PKCE; access-token verification uses joserfc) |
 | Persistence | **SQLite only (Phase 1)** on the OGC server: `ogc.db` + per-tenancy monthly audit DBs; stdlib `sqlite3` behind the storage interfaces (no ORM; SQLAlchemy/Alembic are proposed with the ADB/MySQL backends); 90-day default retention (`docs/storage.md`). Future backends behind the same `DataStore`/`Sink` interfaces: Object Storage, ADB, MySQL, DB MCP server (write path) |
 | Concurrency | `concurrent.futures.ThreadPoolExecutor` (the OCI SDK is synchronous) |
 | Testing | `pytest`, `pytest-mock`; no live OCI calls in unit tests |
@@ -206,8 +206,11 @@ and verification are complete. Resource creation or Terraform success alone is n
 ### 6.3 Human login and application authorization
 
 Human login uses OIDC through the enrolled parent's **default identity domain**, with its own
-client ID and secret. Login is separate from scanner authentication; scanners never use those
-client credentials. Only the parent's groups determine application access:
+client ID and secret. Authorization requests use only `urn:opc:idm:__myscopes__`; no ID token,
+openid/profile/groups scopes or Me lookup are required. Verify the returned user access token and
+bind Asserter membership results to that user using group IDs. Login is separate from scanner
+authentication; scanners never use those client credentials. Only the parent's groups determine
+application access:
 
 | Parent default-domain group | Application access |
 |---|---|

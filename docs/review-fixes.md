@@ -1,5 +1,9 @@
 # Implementation review fixes — 2026-10-09
 
+> **Historical OSC review.** The fixes and test/module names below describe the removed runtime.
+> They do not establish that current OGC implements backup/restore or the same Audit replay.
+> Current capabilities and review corrections are in [implementation status](implementation/status.md).
+
 These six local correctness issues were fixed with synthetic regression tests. No live OCI calls,
 new dependencies, IAM permissions or mutating OCI operations were introduced.
 

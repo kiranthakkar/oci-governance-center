@@ -54,8 +54,16 @@ Resource names checked against [IAM with domains](https://docs.oracle.com/en-us/
 [Usage API](https://docs.oracle.com/en-us/iaas/Content/Billing/Concepts/costanalysisoverview.htm)
 and [organization access](https://docs.oracle.com/en-us/iaas/Content/General/organization/organization_required_iam_policy.htm).
 These are local grants, not proof of all-domain or WIF support; run the release gates before certification.
-The application groups grant no OCI administration permissions. Human self-service Me/group access
-uses the dedicated OIDC app's human token and does not depend on the scanner key.
+The application groups grant no OCI administration permissions. Human membership verification uses
+the dedicated login app's user access token with `/admin/v1/Asserter` and
+`includeMemberships=true`; it does not use Me or depend on the scanner key.
+
+Each child additionally needs an active confidential exchange app, its OAuth client ID bound in the
+propagation trust, and an exact parent-subject impersonation rule (for example `sub eq ogc`, without
+quotes). OGC uses that child app's ID/secret for HTTP Basic caller authentication. Parent JWT issuance
+remains API-key-signed. Child Configure discovers the service user by `userName eq "ogc"`; the user
+OCID, domain identifiers and home region are verified automatically. See the
+[operator setup guide](../operations.md#child-setup-and-credential-separation).
 
 [API key → domain access token](https://docs.oracle.com/en/cloud/paas/identity-cloud/idcsa/token_exchange_grant_type.html)
 and [JWT → UPST](https://docs.oracle.com/en-us/iaas/Content/Identity/api-getstarted/json_web_token_exchange.htm)
