@@ -313,3 +313,19 @@ def test_successful_unlocks_do_not_consume_failed_attempt_budget(settings, servi
             data={"csrf": token, "password": settings.setup_password.get_secret_value()},
         )
         assert accepted.status_code == 303
+
+
+def test_healthcheck_returns_plain_ok_without_login_before_and_after_enrollment(
+    settings, service, parent
+):
+    client = browser(settings, service)
+    for enrolled in (False, True):
+        if enrolled:
+            install(service.store, parent)
+        response = client.get("/healthcheck")
+        assert response.status_code == 200
+        assert response.text == "OK"
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "set-cookie" not in response.headers
+    with service.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0

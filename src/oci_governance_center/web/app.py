@@ -12,7 +12,13 @@ from typing import Any, Literal, get_args
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -312,6 +318,10 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
     async def public_failure(request: Request, error: PublicFailure) -> Response:
         # PublicFailure messages are authored, credential-free diagnostics (diagnostics.py).
         return render(request, "error.html", message=str(error), status_code=400)
+
+    @app.get("/healthcheck", response_class=PlainTextResponse)
+    async def healthcheck() -> str:
+        return "OK"
 
     @app.get("/health")
     async def health() -> dict[str, str]:

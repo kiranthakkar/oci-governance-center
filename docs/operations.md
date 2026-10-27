@@ -48,6 +48,17 @@ the original key; changing it makes stored scanner credentials, child secrets an
 The setup password stops authorizing enrollment once a parent is installed. Administrator login,
 not the setup password, authorizes configuration and replacement after that point.
 
+## Application health check
+
+`GET /healthcheck` is available without login before and after enrollment. It returns HTTP 200
+with the plain-text body `OK`. It checks the application's HTTP response path, not OCI access,
+scanner-worker liveness, or collection coverage. Use a Host header accepted by the configured
+public URL. The existing `/health` endpoint remains available with JSON `{"status":"ok"}`.
+
+```bash
+curl -i http://127.0.0.1:8000/healthcheck
+```
+
 ## Parent setup and human login
 
 Generate/download a parent setup ZIP through the wizard or
