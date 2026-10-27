@@ -185,6 +185,22 @@ class ScanControl:
         instant = instant or now()
         with self.store.db() as db:
             self.store.fence(db, generation)
+            dead = [
+                str(row[0])
+                for row in db.execute(
+                    "SELECT owner FROM scan_jobs WHERE status='running' AND lease_expires<?",
+                    (instant.isoformat(),),
+                )
+                if row[0]
+            ]
+            # A worker that stopped renewing its job also stopped renewing its tenancy leases;
+            # release them now instead of waiting out their full duration. Other processes'
+            # leases (for example a CLI scan) are untouched. A hung worker is fenced, not raced.
+            for owner_id in dead:
+                db.execute(
+                    "DELETE FROM leases WHERE substr(owner,1,?)=?",
+                    (len(owner_id) + 1, owner_id + ":"),
+                )
             db.execute(
                 "UPDATE scan_jobs SET status='interrupted',finished_at=?,error=? "
                 "WHERE status='running' AND lease_expires<?",
@@ -221,6 +237,15 @@ class ScanControl:
                 ),
             )
             return dict(db.execute("SELECT * FROM scan_jobs WHERE id=?", (row["id"],)).fetchone())
+
+    def locked_until(self, instant: datetime | None = None) -> datetime | None:
+        """Latest expiry among live tenancy leases that keep queued scans waiting."""
+        instant = instant or now()
+        with self.store.db() as db:
+            row = db.execute(
+                "SELECT MAX(expires) FROM leases WHERE expires>?", (instant.isoformat(),)
+            ).fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
 
     def renew(self, generation: int, ident: str, owner: str) -> None:
         """Renew only an active job still owned by this worker and organization."""

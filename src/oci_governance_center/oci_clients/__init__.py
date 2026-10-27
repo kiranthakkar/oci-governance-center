@@ -18,11 +18,16 @@ OPERATIONS: dict[str, frozenset[str]] = {
             "list_domains",
         }
     ),
-    "domains": frozenset({"list_users", "list_groups", "list_dynamic_resource_groups"}),
+    "domains": frozenset(
+        {"list_users", "list_groups", "list_dynamic_resource_groups", "list_api_keys"}
+    ),
     "organization": frozenset({"list_organizations", "list_organization_tenancies"}),
     "guard": frozenset({"get_configuration", "list_problems", "list_security_zones"}),
-    "optimizer": frozenset({"list_enrollment_statuses", "list_recommendations"}),
+    "optimizer": frozenset({"list_categories", "list_enrollment_statuses", "list_recommendations"}),
     "audit": frozenset({"list_events"}),
+    # Usage API summaries are read-only queries sent as POST; reviewed exception to the
+    # get_/list_/search_/summarize_ naming rule (AGENTS.md §2.1). Requires read usage-report.
+    "usage": frozenset({"request_summarized_usages"}),
 }
 CONSTRUCTORS: dict[str, Any] = {
     "identity": oci.identity.IdentityClient,
@@ -31,6 +36,7 @@ CONSTRUCTORS: dict[str, Any] = {
     "guard": oci.cloud_guard.CloudGuardClient,
     "optimizer": oci.optimizer.OptimizerClient,
     "audit": oci.audit.AuditClient,
+    "usage": oci.usage_api.UsageapiClient,
 }
 
 
@@ -86,7 +92,12 @@ def all_items(method: Callable[..., Any], *args: Any, **kwargs: Any) -> list[Any
         # The SDK generic paginator expects .items; SCIM returns .resources and
         # totalResults/startIndex instead. Adapt its responses, retaining SDK pagination/retry.
         index = page_kwargs.pop("page", None)
-        if method.__name__ in {"list_users", "list_groups", "list_dynamic_resource_groups"}:
+        if method.__name__ in {
+            "list_users",
+            "list_groups",
+            "list_dynamic_resource_groups",
+            "list_api_keys",
+        }:
             page_kwargs["start_index"] = int(index or 1)
             page_kwargs["count"] = 500
         elif index:

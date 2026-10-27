@@ -16,7 +16,9 @@ The previous implementation has been removed.
   exchange, and worker-local token renewal. Children use confidential-app client credentials for exchange and have no API keys.
 - Separate bounded collection scheduler: IAM/domain inventory, Cloud Guard, Security Zones,
   Cloud Advisor, regional Audit ingestion, historical backfill and rolling reconciliation.
-- Coverage/findings/inventory/activity pages, normalized JSON exports, snapshot change history,
+- Tabs: Overview, Coverage, Cloud Guard, Cloud Advisor, Resource organization (compartment tree),
+  Identity (users, groups, dynamic groups, policies, policy analysis), Activity, Scan, Configuration.
+- Normalized JSON exports, snapshot change history,
   encrypted credentials and server sessions, and local retention.
 - Partial collection recovery, pause/resume, key repair, confirmed child-departure handling,
   and fresh parent replacement with generation fencing and recoverable old-data cleanup.
@@ -26,7 +28,8 @@ parent/child Terraform packages have passed validation against the pinned offici
 Live WIF caller authorization, scopes, all-domain reads, group completeness, human Me/group access,
 provisioning behavior and volume limits still need an authorized non-production organization.
 See [implementation status and release gates](docs/implementation/status.md).
-Tier 2 guardrail collectors and Tier 4/5 policy/anomaly engines are not enabled in this initial build.
+Tier 4 policy and identity analysis is enabled; Tier 2 guardrail collectors and Tier 5 anomaly
+detection are not. See [detection specifications](docs/detections/README.md).
 
 ## Run locally
 
@@ -49,7 +52,9 @@ ogc web --host 127.0.0.1 --port 8000
 ```
 
 Optional: `OGC_AUDIT_BACKFILL_HOURS` (default 168) limits how many historical Audit hours each scan
-backfills; current events are always caught up to the present.
+backfills; current events are always caught up to the present. `OGC_INACTIVE_DAYS` (default 90)
+sets the no-sign-in/no-Audit window for inactive users, and `OGC_API_KEY_MAX_AGE_DAYS` (default 90)
+the API-key rotation age (OCI API keys do not expire).
 
 Local development supports HTTP on `localhost`, `127.0.0.1`, or `[::1]`. Set `OGC_PUBLIC_BASE_URL`
 to the origin only (for example `http://127.0.0.1:8000`), without `/setup` or any other path.

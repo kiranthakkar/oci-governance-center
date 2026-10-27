@@ -1,0 +1,22 @@
+{% extends 'base.html' %}{% import '_filters.html' as f %}{% block content %}
+<p class="eyebrow">Cloud Advisor</p><h1>Cloud Advisor recommendations</h1>
+<p class="intro">Recommendations collected from Cloud Advisor in each tenancy's home region. Estimated savings are OCI's estimates for pending recommendations.</p>
+{{ f.disabled(disabled) }}
+<div class="grid summary-grid">{% for t in summaries %}<section class="card summary">
+<h2>{{ t.label }}</h2>
+<p><span class="badge {{ 'complete' if t.enrolled else 'partial' }}">{{ t.status | replace('_', ' ') | title }}</span></p>
+<p class="stat"><strong>{{ t.pending }}</strong><span>pending · estimated saving {{ '%.2f' | format(t.saving) }}</span></p>
+{% if t.gaps %}<p class="muted">{{ t.gaps | length }} Advisor scope{{ '' if t.gaps | length == 1 else 's' }} incomplete · <a href="/data/coverage?status=failed&amp;tenancy={{ t.tenancy | urlencode }}">View coverage</a></p>{% endif %}
+</section>{% endfor %}</div>
+<form class="card filters" method="get" action="/cloud-advisor">
+{{ f.choice('tenancy', 'Tenancy', filters.tenancy, tenancies) }}
+{{ f.choice('importance', 'Importance', filters.importance, options.importance) }}
+{{ f.choice('status', 'Status', filters.status, options.status) }}
+{{ f.choice('category', 'Category', filters.category, options.category) }}
+{{ f.text('q', 'Name contains', filters.q) }}
+{{ f.buttons('/cloud-advisor', filtered, recommendations | length) }}
+</form>
+<section class="card table-wrap"><div class="title-row"><h2>Recommendations</h2><span class="muted">Pending estimated saving: {{ '%.2f' | format(total_saving) }}</span></div><table><thead><tr><th>Recommendation</th><th>Category</th><th>Importance</th><th>Status</th><th>Estimated saving</th><th>Resources</th><th>Tenancy</th></tr></thead><tbody>
+{% for r in recommendations %}<tr><td>{{ r.name }}<small>{{ r.description }}</small></td><td>{{ r.category }}</td><td>{{ r.importance }}</td><td>{{ r.status }}<small>{{ r.time_updated | when }}</small></td><td>{{ '%.2f' | format(r.saving) }}</td><td>{% for state, count in (r.resource_counts or {}).items() %}<small>{{ state }}: {{ count }}</small>{% else %}<small>Not reported</small>{% endfor %}</td><td>{{ r.tenancy_label }}</td></tr>
+{% else %}<tr><td colspan="7">No recommendations match. Check each tenancy's Advisor enrollment and coverage.</td></tr>{% endfor %}
+</tbody></table></section>{% endblock %}

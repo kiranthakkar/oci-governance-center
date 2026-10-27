@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     session_seconds: int = 3600
     # Historical Audit hours read per scan; forward reads always catch up to the present.
     audit_backfill_hours: int = 168
+    # Identity analysis thresholds: no sign-in or Audit activity, and API key rotation age.
+    inactive_days: int = 90
+    api_key_max_age_days: int = 90
 
     @field_validator("encryption_key")
     @classmethod
@@ -67,7 +70,14 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
-    @field_validator("max_workers", "retention_days", "session_seconds", "audit_backfill_hours")
+    @field_validator(
+        "max_workers",
+        "retention_days",
+        "session_seconds",
+        "audit_backfill_hours",
+        "inactive_days",
+        "api_key_max_age_days",
+    )
     @classmethod
     def positive(cls, value: int) -> int:
         if value < 1:

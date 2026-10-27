@@ -8,7 +8,7 @@
 <div class="grid two">
 <section class="card">
 <p class="eyebrow">On demand</p><h2>Start a scan</h2>
-{% if active_job %}<p><span class="badge {{ active_job.status }}">{{ active_job.status | capitalize }}</span> Requested {{ active_job.requested_at }} UTC.</p><p>Refresh this page to see progress. Repeated requests use the existing scan.</p>{% else %}<p>Run a full scan without changing the recurring schedule.</p>{% endif %}
+{% if active_job and active_job.status == 'queued' and locked_until and worker_online %}<aside class="warning"><strong>Waiting for an earlier scan to release its tenancy locks.</strong> The queued scan starts automatically by {{ locked_until.isoformat() | when }}. This prevents two scans collecting the same tenancy at once.</aside>{% endif %}{% if active_job %}<p><span class="badge {{ active_job.status }}">{{ active_job.status | capitalize }}</span> Requested {{ active_job.requested_at }} UTC.</p><p>Refresh this page to see progress. Repeated requests use the existing scan.</p>{% else %}<p>Run a full scan without changing the recurring schedule.</p>{% endif %}
 {% if admin %}<form method="post" action="/scans/start"><input type="hidden" name="csrf" value="{{ csrf }}"><button {% if active_job or blocked %}disabled{% endif %}>Start scan now</button></form>{% else %}<p class="muted">An ogc_admin can start scans and manage the schedule.</p>{% endif %}
 </section>
 <section class="card">
@@ -18,6 +18,19 @@
 {% if admin and schedule %}<form method="post" action="/scans/schedule/disable"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Disable schedule</button></form>{% endif %}
 </section>
 </div>
+{% macro box(name, label, fid, value) %}<label class="check"><input type="checkbox" name="{{ name }}" form="{{ fid }}"{% if value %} checked{% endif %}{% if not admin %} disabled{% endif %}>{{ label }}</label>{% endmacro %}
+<section class="card"><p class="eyebrow">Collection settings</p><h2>What to collect</h2>
+<p class="muted">Choose what each tenancy collects. By default only the tenancy's default identity domain is read for users, groups and dynamic groups; policies that name groups in unread domains are shown as not analyzed, never as unused. Compartments, regions and the identity-domain list are always collected. Changes apply from the next scan, and data already collected is kept.</p>
+<div class="table-wrap"><table><thead><tr><th>Tenancy</th><th>Governance</th><th>Identity and policies</th><th>Identity domains</th><th>Activity</th><th>Cost</th>{% if admin %}<th></th>{% endif %}</tr></thead><tbody>
+{% for ocid, label, s in collection %}{% set fid = 'collect-' ~ loop.index %}<tr><td>{{ label }}<small>{{ ocid }}</small></td>
+<td>{{ box('cloud_guard', 'Cloud Guard', fid, s.cloud_guard) }}{{ box('cloud_advisor', 'Cloud Advisor', fid, s.cloud_advisor) }}</td>
+<td>{{ box('identities', 'Users, groups, dynamic groups, API keys', fid, s.identities) }}{{ box('policies', 'Policies', fid, s.policies) }}</td>
+<td><label class="check"><input type="radio" name="domains" value="default" form="{{ fid }}"{% if not s.all_domains %} checked{% endif %}{% if not admin %} disabled{% endif %}>Default domain only</label><label class="check"><input type="radio" name="domains" value="all" form="{{ fid }}"{% if s.all_domains %} checked{% endif %}{% if not admin %} disabled{% endif %}>All identity domains</label></td>
+<td>{{ box('audit', 'Audit events', fid, s.audit) }}</td>
+<td>{% if loop.first %}{{ box('cost', 'Organization cost', fid, s.cost) }}<small>Covers all tenancies; needs read usage-report</small>{% else %}<span class="muted">Collected from the parent</span>{% endif %}</td>
+{% if admin %}<td><form id="{{ fid }}" method="post" action="/scans/settings/{{ ocid | urlencode }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">Save</button></form></td>{% endif %}</tr>
+{% endfor %}</tbody></table></div>
+{% if not admin %}<p class="muted">An ogc_admin can change what is collected.</p>{% endif %}</section>
 {% if admin %}
 <section class="card"><h2>Configure schedule</h2>
 <form method="post" action="/scans/schedule">

@@ -6,7 +6,13 @@ import zipfile
 
 import pytest
 
-from oci_governance_center.provisioning.bundle import bundle, deploy_url, manual, terraform
+from oci_governance_center.provisioning.bundle import (
+    bundle,
+    deploy_url,
+    manual,
+    policies,
+    terraform,
+)
 
 
 @pytest.mark.parametrize("kind", ["parent", "child"])
@@ -104,3 +110,9 @@ def test_admin_downloads_updated_child_bundle(settings, service, parent, monkeyp
         trust = config["resource"]["oci_identity_domains_identity_propagation_trust"]["parent"]
         assert trust["oauth_clients"] == ["${oci_identity_domains_app.exchange.name}"]
         assert "OGC Parent Token Exchange" in archive.read("README.md").decode()
+
+
+def test_only_the_parent_reads_organizations_and_cost():
+    usage = "Allow group 'Default'/'ogc_scanner' to read usage-report in tenancy"
+    assert usage in policies(True) and usage not in policies(False)
+    assert all(" to read " in statement for statement in policies(True))

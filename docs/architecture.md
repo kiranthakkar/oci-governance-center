@@ -86,7 +86,7 @@ evidence. Live gates are listed in [implementation status](implementation/status
 | Storage migrations | Explicit versioned migrations | Not implemented: the schema is created with `CREATE TABLE IF NOT EXISTS` only (see §5). |
 | Backup and restore | Complete manifest and recovery | Not implemented. Replacement removes the managed backup/export directories. |
 | Tier 2 guardrails | collection §4 | Not implemented. |
-| Tier 4 policy analysis | Policy-local aliases, parser, risky-grant rules | Not implemented; raw statements are collected in `identity.policies`. |
+| Tier 4 policy analysis | Policy-local aliases, parser, risky-grant rules | Implemented (mocked tests): tolerant parser (`analyzers/policy.py`) and POL-*/IAM-* rules (`analyzers/identity.py`) persisted as findings in four fail-closed scopes (`analysis.policy`, `.identity`, `.api_keys`, `.activity`); an incomplete input publishes the scope as incomplete and resolves nothing. Alias definitions are recorded (POL-XTEN-001) but aliases are not yet substituted. Admin-role grants are not collected. |
 | Tier 5 anomalies | collection §7 | Not implemented; Audit events are stored for later use. |
 
 ## 5. Document ownership

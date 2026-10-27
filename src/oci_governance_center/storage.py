@@ -16,7 +16,39 @@ from typing import Any
 
 from cryptography.fernet import Fernet
 
-from .models import Batch, Child, ChildCredentials, Finding, Parent, Scope, now
+from .models import (
+    Batch,
+    Child,
+    ChildCredentials,
+    Finding,
+    Parent,
+    ScanSettings,
+    Scope,
+    Triage,
+    TriageState,
+    now,
+)
+
+
+def like(value: str) -> str:
+    """Build a case-insensitive substring LIKE pattern with SQL wildcards escaped."""
+    escaped = value.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def effective(finding: Finding, decision: Triage | None) -> Finding:
+    """Apply triage to an evaluated finding.
+
+    Triage only changes an open finding. A closed finding detected again after it was closed
+    reopens; a resolved finding stays resolved, and an ignored one returns to ignored if seen again.
+    """
+    if decision is None:
+        return finding
+    if finding.status != "open":
+        return finding.model_copy(update={"triage": decision})
+    if decision.state == "closed" and finding.last_seen > decision.at:
+        return finding
+    return finding.model_copy(update={"status": decision.state, "triage": decision})
 
 
 class StaleWork(RuntimeError):
@@ -72,6 +104,9 @@ class Store:
                   scope TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(job_id,scope));
                 CREATE TABLE IF NOT EXISTS scan_worker(id INTEGER PRIMARY KEY CHECK(id=1),
                   heartbeat TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS scan_settings(tenancy TEXT PRIMARY KEY,
+                  data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS finding_triage(id TEXT PRIMARY KEY,data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS control_events(id TEXT PRIMARY KEY,time TEXT,action TEXT,
                   actor TEXT,generation INTEGER);
             """)
@@ -186,6 +221,8 @@ class Store:
                 "scan_schedule",
                 "scan_jobs",
                 "scan_scope_results",
+                "scan_settings",
+                "finding_triage",
             ):
                 db.execute(f"DELETE FROM {table}")  # noqa: S608 - static local table allow-list  # static local table list, not OCI
             db.execute(
@@ -392,10 +429,106 @@ class Store:
             cursor = db.execute(f"SELECT * FROM {table}")  # noqa: S608 - table allow-list above
             rows = [dict(row) for row in cursor.fetchall()]
         if table == "findings":
-            # Every reader (dashboard, data pages, exports) sees only contract-valid findings.
+            # Every reader (dashboard, data pages, exports) sees only contract-valid findings,
+            # with administrator triage applied as the effective status.
+            decisions = self.triage_decisions()
             for row in rows:
-                row["data"] = Finding.model_validate_json(row["data"]).model_dump_json()
+                finding = effective(
+                    Finding.model_validate_json(row["data"]), decisions.get(row["id"])
+                )
+                row["data"] = finding.model_dump_json()
         return rows
+
+    def records(
+        self,
+        generation: int,
+        include: tuple[str, ...] = (),
+        exclude: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        """Stored records whose dataset starts with an included (and no excluded) prefix."""
+        clauses: list[str] = []
+        values: list[Any] = []
+        dataset = "json_extract(scope,'$.dataset')"
+        if include:
+            clauses.append("(" + " OR ".join(f"substr({dataset},1,?)=?" for _ in include) + ")")
+            for prefix in include:
+                values += [len(prefix), prefix]
+        for prefix in exclude:
+            clauses.append(f"substr({dataset},1,?)!=?")
+            values += [len(prefix), prefix]
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.db() as db:
+            self.fence(db, generation)
+            # Clauses are built from fixed SQL fragments; prefixes are bound parameters.
+            cursor = db.execute("SELECT * FROM records" + where, values)  # noqa: S608
+            return [dict(row) for row in cursor.fetchall()]
+
+    def triage_decisions(self) -> dict[str, Triage]:
+        with self.db() as db:
+            return {
+                row["id"]: Triage.model_validate_json(row["data"])
+                for row in db.execute("SELECT id,data FROM finding_triage").fetchall()
+            }
+
+    def triage(
+        self, generation: int, ident: str, state: TriageState | None, actor: str, reason: str = ""
+    ) -> bool:
+        """Ignore, close or (state None) reopen one finding; False when it does not exist."""
+        decision = (
+            Triage(state=state, actor=actor, at=now().isoformat(), reason=reason.strip())
+            if state
+            else None
+        )
+        with self.db() as db:
+            self.fence(db, generation)
+            if db.execute("SELECT 1 FROM findings WHERE id=?", (ident,)).fetchone() is None:
+                return False
+            if decision is None:
+                db.execute("DELETE FROM finding_triage WHERE id=?", (ident,))
+            else:
+                db.execute(
+                    "INSERT OR REPLACE INTO finding_triage VALUES(?,?)",
+                    (ident, decision.model_dump_json()),
+                )
+            db.execute(
+                "INSERT INTO control_events VALUES(?,?,?,?,?)",
+                (
+                    secrets.token_hex(16),
+                    now().isoformat(),
+                    f"finding_{state or 'reopened'}",
+                    actor,
+                    generation,
+                ),
+            )
+        return True
+
+    def scan_settings(self, tenancy: str) -> ScanSettings:
+        """A tenancy's collection settings; defaults when none were saved."""
+        with self.db() as db:
+            row = db.execute(
+                "SELECT data FROM scan_settings WHERE tenancy=?", (tenancy,)
+            ).fetchone()
+        return ScanSettings.model_validate_json(row[0]) if row else ScanSettings()
+
+    def save_scan_settings(
+        self, generation: int, tenancy: str, settings: ScanSettings, actor: str
+    ) -> None:
+        with self.db() as db:
+            self.fence(db, generation)
+            db.execute(
+                "INSERT OR REPLACE INTO scan_settings VALUES(?,?)",
+                (tenancy, settings.model_dump_json()),
+            )
+            db.execute(
+                "INSERT INTO control_events VALUES(?,?,?,?,?)",
+                (
+                    secrets.token_hex(16),
+                    now().isoformat(),
+                    "scan_settings_changed",
+                    actor,
+                    generation,
+                ),
+            )
 
     def block(self, generation: int, blocked: bool) -> None:
         """Suspend/resume the organization after confirmed key failure or verified repair."""
@@ -521,6 +654,7 @@ class Store:
             db.execute("DELETE FROM changes WHERE time<?", (cutoff,))
             db.execute("DELETE FROM records WHERE collected<?", (cutoff,))
             db.execute("DELETE FROM findings WHERE json_extract(data,'$.last_seen')<?", (cutoff,))
+            db.execute("DELETE FROM finding_triage WHERE id NOT IN (SELECT id FROM findings)")
             db.execute("DELETE FROM audit_receipts WHERE end<?", (cutoff,))
             db.execute(
                 "DELETE FROM control_events WHERE time<?",
@@ -543,8 +677,67 @@ class Store:
             self.collection_fence(db, generation, scope.tenancy, revision, lease)
             db.execute("INSERT OR REPLACE INTO checkpoints VALUES(?,?)", (scope.key, value))
 
-    def audit_events(self, generation: int, limit: int = 200) -> list[dict[str, Any]]:
-        """Read latest normalized events, deduplicating overlap/key-rotation files in this org."""
+    def audit_principals(self, generation: int, tenancy: str, since: str) -> set[str]:
+        """Distinct principal OCIDs with Audit events in one tenancy since an ISO timestamp."""
+        with self.db() as db:
+            self.fence(db, generation)
+        safe = hashlib.sha256(tenancy.encode()).hexdigest()
+        principals: set[str] = set()
+        for path in (self.root / "audit").glob(f"g*/{safe}/*.db"):
+            if path.is_symlink():
+                continue
+            with sqlite3.connect(path) as audit:
+                principals |= {
+                    str(row[0])
+                    for row in audit.execute(
+                        "SELECT DISTINCT json_extract(data,'$.principal_id') FROM events "
+                        "WHERE json_extract(data,'$.time')>=?",
+                        (since,),
+                    )
+                    if row[0]
+                }
+        return principals
+
+    def audit_events(
+        self,
+        generation: int,
+        limit: int = 200,
+        *,
+        tenancy: str = "",
+        region: str = "",
+        principal: str = "",
+        event: str = "",
+        result: str = "",
+    ) -> list[dict[str, Any]]:
+        """Read the latest matching events, deduplicating overlap/key-rotation files in this org.
+
+        Filters run in SQL before the limit, so older matching events remain findable. Text
+        filters are case-insensitive substrings with LIKE wildcards escaped.
+        """
+        if result not in {"", "success", "failure"}:
+            raise ValueError("Unsupported Audit result filter")
+        clauses: list[str] = []
+        params: list[Any] = []
+        if region:
+            clauses.append("region=?")
+            params.append(region)
+        if principal:
+            clauses.append(
+                "(lower(coalesce(json_extract(data,'$.principal_name'),'')) LIKE ? ESCAPE '\\' "
+                "OR lower(coalesce(json_extract(data,'$.principal_id'),'')) LIKE ? ESCAPE '\\')"
+            )
+            params += [like(principal)] * 2
+        if event:
+            clauses.append(
+                "(lower(coalesce(json_extract(data,'$.type'),'')) LIKE ? ESCAPE '\\' "
+                "OR lower(coalesce(json_extract(data,'$.action'),'')) LIKE ? ESCAPE '\\')"
+            )
+            params += [like(event)] * 2
+        if result == "success":
+            clauses.append("CAST(json_extract(data,'$.status') AS INTEGER) BETWEEN 200 AND 399")
+        elif result == "failure":
+            clauses.append("CAST(json_extract(data,'$.status') AS INTEGER) >= 400")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self.db() as db:
             self.fence(db, generation)
             row = db.execute("SELECT parent FROM state WHERE id=1").fetchone()
@@ -555,22 +748,25 @@ class Store:
                 Child.model_validate_json(r[0]).ocid
                 for r in db.execute("SELECT data FROM children").fetchall()
             ]
+            if tenancy:
+                tenancies = [t for t in tenancies if t == tenancy]
             mapping = {hashlib.sha256(t.encode()).hexdigest(): t for t in tenancies}
             events: dict[tuple[str, str, str], dict[str, Any]] = {}
             for path in (self.root / "audit").glob("g*/*/*.db"):
                 if path.is_symlink() or path.parent.name not in mapping:
                     continue
-                tenancy = mapping[path.parent.name]
+                owner = mapping[path.parent.name]
                 with sqlite3.connect(path) as audit:
                     rows = audit.execute(
-                        "SELECT region,id,data FROM events ORDER BY "
-                        "json_extract(data,'$.time') DESC LIMIT ?",
-                        (limit,),
+                        "SELECT region,id,data FROM events"  # noqa: S608 - static clauses only
+                        + where
+                        + " ORDER BY json_extract(data,'$.time') DESC LIMIT ?",
+                        (*params, limit),
                     ).fetchall()
-                for region, ident, payload in rows:
-                    events[(tenancy, region, ident)] = {
+                for event_region, ident, payload in rows:
+                    events[(owner, event_region, ident)] = {
                         **json.loads(payload),
-                        "tenancy": tenancy,
-                        "region": region,
+                        "tenancy": owner,
+                        "region": event_region,
                     }
             return sorted(events.values(), key=lambda event: event["time"], reverse=True)[:limit]

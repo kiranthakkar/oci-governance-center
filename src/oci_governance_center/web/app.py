@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import urlsplit
+from typing import Any, Literal, get_args
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -25,11 +26,24 @@ from ..auth import oidc
 from ..collectors.inventory import public_error
 from ..config import Settings
 from ..diagnostics import PublicFailure
-from ..models import PARENT_EXCHANGE_SCOPE, Domain, Parent
+from ..models import (
+    PARENT_EXCHANGE_SCOPE,
+    SEVERITIES,
+    Domain,
+    FindingSource,
+    Parent,
+    ScanSettings,
+    TriageState,
+)
 from ..provisioning.bundle import bundle, deploy_url, manual
 from ..scans import ScanControl, ScanSchedule
 from ..service import Service
 from ..storage import StaleWork, Store
+from . import views
+
+FINDING_STATUSES = {"open", "resolved", "ignored", "closed"}
+# Cost rows are large and only the Cost tab reads them.
+COST = ("cost.",)
 
 COOKIE = "__Host-ogc"
 
@@ -114,6 +128,8 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
     )
     directory = Path(__file__).parent
     templates = Jinja2Templates(directory=directory / "templates")
+    templates.env.filters["when"] = views.when
+    templates.env.filters["money"] = views.money
     app.mount("/static", StaticFiles(directory=directory / "static"), name="static")
 
     def render(request: Request, template: str, **context: Any) -> Response:
@@ -352,6 +368,7 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
         draft: dict[str, Any] | None = None,
     ) -> Response:
         generation = request.state.authorized_generation
+        parent = store.state()[1]
         saved = scans.schedule(generation)
         schedule = ScanSchedule.model_validate_json(saved["data"]) if saved else None
         jobs = scans.jobs(generation)
@@ -383,6 +400,11 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
             jobs=jobs,
             active_job=next((job for job in jobs if job["status"] in {"queued", "running"}), None),
             worker_online=scans.online(),
+            locked_until=scans.locked_until(),
+            collection=[
+                (ocid, label, store.scan_settings(ocid))
+                for ocid, label in (tenancy_options(generation, parent) if parent else [])
+            ],
             draft=values,
             message=message,
             failed=failed,
@@ -395,7 +417,7 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
         await access(request)
         message = "Scan requested. Refresh this page to see progress." if requested else ""
         if saved:
-            message = "Scan schedule updated."
+            message = "Scan settings updated. Changes apply from the next scan."
         return scan_page(request, message)
 
     @app.get("/scans/{ident}")
@@ -472,6 +494,63 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
         await form(request)
         scans.disable(request.state.authorized_generation)
         return RedirectResponse("/scans?saved=true", status_code=303)
+
+    @app.post("/scans/settings/{tenancy}")
+    async def scan_settings_save(request: Request, tenancy: str) -> Response:
+        parent = await access(request, admin=True)
+        values = await form(request)
+        generation = request.state.authorized_generation
+        if tenancy not in dict(tenancy_options(generation, parent)):
+            raise HTTPException(404, "Tenancy not found")
+        chosen = ScanSettings(
+            **{
+                name: values.get(name) == "on"
+                for name in ("cloud_guard", "cloud_advisor", "identities", "policies", "audit")
+            },
+            # Cost is read from the parent only; a child's setting keeps the default.
+            cost=values.get("cost") == "on" if tenancy == parent.domain.tenancy_ocid else True,
+            all_domains=values.get("domains") == "all",
+        )
+        store.save_scan_settings(
+            generation, tenancy, chosen, request.state.session["grant"]["subject"]
+        )
+        return RedirectResponse("/scans?saved=true", status_code=303)
+
+    @app.post("/findings/{ident}/triage")
+    async def finding_triage(request: Request, ident: str) -> Response:
+        await access(request, admin=True)
+        values = await form(request)
+        action = str(values.get("action", ""))
+        states: dict[str, TriageState | None] = {
+            "ignore": "ignored",
+            "close": "closed",
+            "reopen": None,
+        }
+        if action not in states:
+            raise HTTPException(400, "Unsupported action")
+        reason = str(values.get("reason", "")).strip()
+        if len(reason) > 500:
+            raise HTTPException(400, "Reason is too long")
+        if not store.triage(
+            request.state.authorized_generation,
+            ident,
+            states[action],
+            request.state.session["grant"]["subject"],
+            reason,
+        ):
+            raise HTTPException(404, "Finding not found")
+        target = str(values.get("next", ""))
+        # Only same-site relative paths; anything else (//host, scheme, backslash) is ignored.
+        parts = urlsplit(target)
+        if (
+            not target.startswith("/")
+            or target.startswith("//")
+            or "\\" in target
+            or parts.scheme
+            or parts.netloc
+        ):
+            target = "/data/findings"
+        return RedirectResponse(target, status_code=303)
 
     @app.get("/setup")
     async def setup(request: Request, edit: bool = False) -> Response:
@@ -797,46 +876,405 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
         )
         return RedirectResponse("/configuration", status_code=303)
 
-    @app.get("/activity")
-    async def activity(request: Request) -> Response:
-        await access(request)
+    def tenancy_options(generation: int, parent: Parent) -> list[tuple[str, str]]:
+        """Label the parent and discovered children for filter menus; OCIDs stay the values."""
+        return [(parent.domain.tenancy_ocid, parent.name + " (parent)")] + [
+            (child.ocid, child.name) for child in store.children(generation)
+        ]
+
+    def text_filter(value: str) -> str:
+        """Bound free-text filter input; matching is a case-insensitive substring."""
+        value = value.strip()
+        if len(value) > 200:
+            raise HTTPException(400, "Filter text is too long")
+        return value
+
+    def choice(value: str, allowed: set[str]) -> str:
+        """Accept only a known menu value (or none)."""
+        if value and value not in allowed:
+            raise HTTPException(400, "Unsupported filter value")
+        return value
+
+    def finding_status(value: str | None) -> str:
+        """Finding lists show open findings unless a status (or "" for all) is chosen."""
+        return "open" if value is None else choice(value, FINDING_STATUSES)
+
+    def narrowed(filters: dict[str, str]) -> bool:
+        """Whether filters differ from the defaults (all values, open findings)."""
+        return any(v for k, v in filters.items() if not (k == "status" and v == "open"))
+
+    def disabled_for(generation: int, parent: Parent, *flags: str) -> list[tuple[str, list[str]]]:
+        """Tenancies whose scan settings disable collection shown on a tab, per setting."""
+        labels = dict(tenancy_options(generation, parent))
+        names = {
+            "cloud_guard": "Cloud Guard",
+            "cloud_advisor": "Cloud Advisor",
+            "identities": "identities",
+            "policies": "policies",
+        }
+        result = []
+        for flag in flags:
+            off = [
+                label
+                for ocid, label in labels.items()
+                if not getattr(store.scan_settings(ocid), flag)
+            ]
+            if off:
+                result.append((names[flag], off))
+        return result
+
+    @app.get("/cloud-guard")
+    async def cloud_guard_tab(
+        request: Request,
+        tenancy: str = "",
+        severity: str = "",
+        source: str = "",
+        region: str = "",
+        resource_type: str = "",
+        status: str | None = None,
+        q: str = "",
+    ) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        filters = {
+            "tenancy": text_filter(tenancy),
+            "severity": choice(severity, set(SEVERITIES)),
+            "source": choice(source, {"cloud_guard", "security_zone"}),
+            "region": text_filter(region),
+            "resource_type": text_filter(resource_type),
+            "status": finding_status(status),
+            "q": text_filter(q),
+        }
+        tenancies = tenancy_options(generation, parent)
+        view = views.cloud_guard(
+            views.records_by_dataset(store.records(generation, exclude=COST)),
+            views.parse_findings(store.rows("findings", generation)),
+            store.rows("coverage", generation),
+            tenancies,
+            filters,
+        )
         return render(
-            request, "activity.html", events=store.audit_events(request.state.authorized_generation)
+            request,
+            "cloud_guard.html",
+            **view,
+            filters=filters,
+            filtered=narrowed(filters),
+            tenancies=tenancies,
+            severities=SEVERITIES,
+            disabled=disabled_for(generation, parent, "cloud_guard"),
+            here=str(request.url.path) + ("?" + request.url.query if request.url.query else ""),
+        )
+
+    @app.get("/cloud-advisor")
+    async def cloud_advisor_tab(
+        request: Request,
+        tenancy: str = "",
+        importance: str = "",
+        status: str = "",
+        category: str = "",
+        q: str = "",
+    ) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        filters = {
+            "tenancy": text_filter(tenancy),
+            "importance": text_filter(importance),
+            "status": text_filter(status),
+            "category": text_filter(category),
+            "q": text_filter(q),
+        }
+        tenancies = tenancy_options(generation, parent)
+        view = views.cloud_advisor(
+            views.records_by_dataset(store.records(generation, exclude=COST)),
+            store.rows("coverage", generation),
+            tenancies,
+            filters,
+        )
+        return render(
+            request,
+            "cloud_advisor.html",
+            **view,
+            filters=filters,
+            filtered=any(filters.values()),
+            tenancies=tenancies,
+            disabled=disabled_for(generation, parent, "cloud_advisor"),
+        )
+
+    @app.get("/cost")
+    async def cost_tab(
+        request: Request,
+        view: str = "tenancy",
+        tenancy: str = "",
+        service: str = "",
+        month_from: str = "",
+        month_to: str = "",
+        q: str = "",
+    ) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        tenancies = tenancy_options(generation, parent)
+        for month in (month_from, month_to):
+            if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+                raise HTTPException(400, "Unsupported filter value")
+        filters = {
+            "tenancy": choice(tenancy, set(dict(tenancies))),
+            "service": text_filter(service),
+            "month_from": month_from,
+            "month_to": month_to,
+            "q": text_filter(q),
+        }
+        selected = choice(view, set(views.COST_VIEWS)) or "tenancy"
+        ocid = parent.domain.tenancy_ocid
+        data = views.cost(
+            views.records_by_dataset(store.records(generation, include=COST)),
+            store.rows("coverage", generation),
+            tenancies,
+            filters,
+            selected,
+            ocid,
+            store.scan_settings(ocid).cost,
+        )
+        shared = {k: v for k, v in filters.items() if v}
+        return render(
+            request,
+            "cost.html",
+            **data,
+            view=selected,
+            filters=filters,
+            filtered=any(v for k, v in filters.items() if not k.startswith("month_")),
+            tenancies=tenancies,
+            shared_query=urlencode(shared),
+        )
+
+    @app.get("/resources")
+    async def resources_tab(request: Request, tenancy: str = "", deleted: bool = False) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        tenancies = tenancy_options(generation, parent)
+        labels = dict(tenancies)
+        selected = tenancy or parent.domain.tenancy_ocid
+        if selected not in labels:
+            raise HTTPException(400, "Unsupported filter value")
+        view = views.compartment_tree(
+            views.records_by_dataset(store.records(generation, exclude=COST)),
+            store.rows("coverage", generation),
+            selected,
+            labels[selected],
+            deleted,
+            store.scan_settings(selected).policies,
+        )
+        return render(
+            request,
+            "resources.html",
+            **view,
+            tenancies=tenancies,
+            selected=selected,
+            include_deleted=deleted,
+        )
+
+    @app.get("/identity")
+    async def identity_tab(
+        request: Request,
+        view: str = "users",
+        tenancy: str = "",
+        domain: str = "",
+        q: str = "",
+        mfa: str = "",
+        rule: str = "",
+        severity: str = "",
+        status: str | None = None,
+        compartment: str = "",
+    ) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        filters = {
+            "tenancy": text_filter(tenancy),
+            "domain": text_filter(domain),
+            "compartment": text_filter(compartment),
+            "q": text_filter(q),
+            "mfa": choice(mfa, {"ENROLLED", "not_enrolled", "unknown"}),
+            "rule": text_filter(rule),
+            "severity": choice(severity, set(SEVERITIES)),
+            "status": finding_status(status),
+        }
+        selected = choice(view, set(views.IDENTITY_VIEWS)) or "users"
+        if selected != "analysis":
+            filters["status"] = ""
+        tenancies = tenancy_options(generation, parent)
+        data = views.identity(
+            views.records_by_dataset(store.records(generation, exclude=COST)),
+            views.parse_findings(store.rows("findings", generation)),
+            tenancies,
+            filters,
+            selected,
+            settings.api_key_max_age_days,
+            store.rows("coverage", generation),
+        )
+        shared = {k: v for k, v in filters.items() if k in {"tenancy", "domain"} and v}
+        return render(
+            request,
+            "identity.html",
+            **data,
+            view=selected,
+            filters=filters,
+            filtered=narrowed(filters),
+            tenancies=tenancies,
+            severities=SEVERITIES,
+            shared_query=urlencode(shared),
+            disabled=disabled_for(generation, parent, "identities", "policies"),
+            here=str(request.url.path) + ("?" + request.url.query if request.url.query else ""),
+        )
+
+    @app.get("/activity")
+    async def activity(
+        request: Request,
+        tenancy: str = "",
+        region: str = "",
+        principal: str = "",
+        event: str = "",
+        result: str = "",
+    ) -> Response:
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        if result not in {"", "success", "failure"}:
+            raise HTTPException(400, "Unsupported filter value")
+        filters = {
+            "tenancy": text_filter(tenancy),
+            "region": text_filter(region),
+            "principal": text_filter(principal),
+            "event": text_filter(event),
+            "result": result,
+        }
+        regions = sorted(
+            {
+                scope["region"]
+                for scope in (
+                    json.loads(row["scope"]) for row in store.rows("coverage", generation)
+                )
+                if scope["dataset"] == "audit.events"
+            }
+        )
+        return render(
+            request,
+            "activity.html",
+            events=store.audit_events(
+                generation,
+                tenancy=filters["tenancy"],
+                region=filters["region"],
+                principal=filters["principal"],
+                event=filters["event"],
+                result=filters["result"],
+            ),
+            filters=filters,
+            filtered=any(filters.values()),
+            tenancies=tenancy_options(generation, parent),
+            regions=regions,
         )
 
     @app.get("/data/{table}")
     async def data_page(
         request: Request,
         table: Literal["records", "coverage", "findings", "control_events", "changes"],
-        status: Literal["complete", "failed", "open", "resolved"] | None = None,
-        source: Literal["coverage"] | None = None,
+        status: str | None = None,
+        source: str = "",
+        severity: str = "",
+        rule: str = "",
         tenancy: str = "",
+        dataset: str = "",
+        region: str = "",
+        q: str = "",
     ) -> Response:
-        await access(request)
-        rows = store.rows(table, request.state.authorized_generation)
+        parent = await access(request)
+        generation = request.state.authorized_generation
+        if status is None:
+            status = "open" if table == "findings" else ""
+        allowed = {
+            "status": {"complete", "failed"} | FINDING_STATUSES,
+            "source": set(get_args(FindingSource)),
+            "severity": set(SEVERITIES),
+        }
+        for name, value in (("status", status), ("source", source), ("severity", severity)):
+            if value and value not in allowed[name]:
+                raise HTTPException(400, "Unsupported filter value")
+        filters = {
+            "status": status,
+            "source": source,
+            "severity": severity,
+            "rule": text_filter(rule),
+            "tenancy": text_filter(tenancy),
+            "dataset": text_filter(dataset),
+            "region": text_filter(region),
+            "q": text_filter(q),
+        }
+        rows = (
+            # Cost rows have their own tab; exports still include them.
+            store.records(generation, exclude=COST)
+            if table == "records"
+            else store.rows(table, generation)
+        )
         for row in rows:
             if "data" in row:
                 row["data"] = json.loads(row["data"])
             if "scope" in row:
                 row["scope"] = json.loads(row["scope"])
-        if status:
-            rows = [
-                row
-                for row in rows
-                if (row.get("data", {}).get("status") if table == "findings" else row.get("status"))
-                == status
-            ]
-        if source:
-            rows = [row for row in rows if row.get("data", {}).get("source") == source]
-        if tenancy:
-            rows = [row for row in rows if row.get("scope", {}).get("tenancy") == tenancy]
-        rows.sort(key=lambda row: row.get("status") == "complete")
+        # Menu options come from everything stored, so narrowing one filter keeps the others.
+        options = {
+            "dataset": sorted({str(r["scope"]["dataset"]) for r in rows if "scope" in r}),
+            "region": sorted({str(r["scope"]["region"]) for r in rows if "scope" in r}),
+            "rule": sorted(
+                {str(r["data"]["rule_id"]) for r in rows if "rule_id" in r.get("data", {})}
+            ),
+        }
+
+        def keep(row: dict[str, Any]) -> bool:
+            data, scope = row.get("data", {}), row.get("scope", {})
+            row_status = data.get("status") if table == "findings" else row.get("status")
+            searchable = (
+                data.get("title", "")
+                if table == "findings"
+                else " ".join(
+                    str(data.get(field) or "")
+                    for field in ("name", "display_name", "user_name", "id")
+                )
+                + " "
+                + str(row.get("key", ""))
+            )
+            return all(
+                (
+                    not filters["status"] or row_status == filters["status"],
+                    not filters["source"] or data.get("source") == filters["source"],
+                    not filters["severity"] or data.get("severity") == filters["severity"],
+                    not filters["rule"] or data.get("rule_id") == filters["rule"],
+                    not filters["tenancy"] or scope.get("tenancy") == filters["tenancy"],
+                    not filters["dataset"] or scope.get("dataset") == filters["dataset"],
+                    not filters["region"] or scope.get("region") == filters["region"],
+                    not filters["q"] or filters["q"].casefold() in searchable.casefold(),
+                )
+            )
+
+        rows = [row for row in rows if keep(row)]
+        if table == "findings":
+            rank = {severity: index for index, severity in enumerate(SEVERITIES)}
+            rows.sort(key=lambda row: str(row["data"].get("last_seen", "")), reverse=True)
+            rows.sort(
+                key=lambda row: (row["data"]["status"] != "open", rank[row["data"]["severity"]])
+            )
+        else:
+            rows.sort(key=lambda row: row.get("status") == "complete")
         return render(
             request,
             "data.html",
             table=table,
             rows=rows,
-            filtered=bool(status or source or tenancy),
+            filters=filters,
+            filtered=narrowed(filters) if table == "findings" else any(filters.values()),
+            options=options,
+            here=str(request.url.path) + ("?" + request.url.query if request.url.query else ""),
+            tenancies=tenancy_options(generation, parent),
+            severities=SEVERITIES,
+            sources=[
+                (source, source.replace("_", " ").title()) for source in get_args(FindingSource)
+            ],
         )
 
     @app.get("/exports/{table}.json")

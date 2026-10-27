@@ -28,7 +28,8 @@ RESOURCES = (
 
 def policies(parent: bool) -> list[str]:
     """Local tenancy read grants only; never Endorse/Admit or resource writes."""
-    resources = RESOURCES + (("organizations-family",) if parent else ())
+    # Organization discovery and organization-wide cost (Usage API) are read from the parent only.
+    resources = RESOURCES + (("organizations-family", "usage-report") if parent else ())
     return [
         f"Allow group 'Default'/'ogc_scanner' to read {resource} in tenancy"
         for resource in resources

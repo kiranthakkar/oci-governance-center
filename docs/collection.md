@@ -82,15 +82,28 @@ higher tier today collects Tier 1 only.
 | `identity.policies` | `IdentityClient.list_policies` per compartment (no subtree option) | home | policy OCID | id, compartment, name, description, statements, lifecycle state, created, version date | snapshot |
 | `identity.region_subscriptions` | `IdentityClient.list_region_subscriptions` | home | region name | region key/name, status, is home | snapshot |
 | `identity.domains` | `IdentityClient.list_domains` **per compartment** (domains can live in any compartment; no subtree option) | home | domain OCID | id, compartment, display name, URL, home region, replica regions, type, lifecycle state | snapshot |
-| `identity_domains.users` | `IdentityDomainsClient(service_endpoint=<domain URL>).list_users(attributes="userName,ocid")` per domain | domain URL | `<domain OCID>/<user id>` | domain OCID, id, OCID, user name | snapshot |
+| `identity_domains.users` | `IdentityDomainsClient(service_endpoint=<domain URL>).list_users` per domain with `active`, MFA `mfaStatus`, `isFederatedUser`, `serviceUser` and `lastSuccessfulLoginDate` attributes (2026-10-22) | domain URL | `<domain OCID>/<user id>` | domain OCID, id, OCID, user name, active, MFA status, federated, service user, last successful sign-in | snapshot |
+| `identity_domains.api_keys` | `IdentityDomainsClient.list_api_keys` per domain with default attributes (an explicit `id,ocid,user,meta` list was rejected with HTTP 400 live; 2026-10-22) | domain URL | API key id | id, OCID, owning user id/OCID, created. **Never** the key material or fingerprint; OCI API keys have no expiry | snapshot |
 | `identity_domains.groups` | `IdentityDomainsClient.list_groups(attributes="displayName,ocid,members")` per domain | domain URL | `<domain OCID>/<group id>` | domain OCID, id, OCID, display name, members (value, OCID, type) | snapshot |
 | `identity_domains.dynamic_groups` | `IdentityDomainsClient.list_dynamic_resource_groups(attributes="displayName,ocid,matchingRule")` per domain | domain URL | `<domain OCID>/<id>` | domain OCID, id, OCID, display name, matching rule | snapshot |
 | `cloud_guard.configuration` | `CloudGuardClient.get_configuration` | home → gives reporting region | tenancy OCID | status, reporting region, self-manage resources | snapshot |
 | `cloud_guard.problems` | `CloudGuardClient.list_problems(compartment_id_in_subtree=True, access_level="ACCESSIBLE")` | reporting | problem OCID | id, compartment, resource (id, type, name), region, risk level, detector, detector rule, labels, lifecycle state/detail, first/last detected | snapshot of open problems; resolved ones become `removed` |
 | `security_zones.zones` | `CloudGuardClient.list_security_zones` | reporting | zone OCID | id, compartment, display name, recipe, lifecycle state | snapshot |
 | `optimizer.enrollment` | `OptimizerClient.list_enrollment_statuses` | home | enrollment status OCID | status, status reason | snapshot |
-| `optimizer.recommendations` | `OptimizerClient.list_recommendations(compartment_id_in_subtree=True)` per category from `list_categories` | home | recommendation OCID | id, category, name, importance, status, resource counts, estimated impact fields as returned, time updated | snapshot |
+| `optimizer.categories` | `OptimizerClient.list_categories(compartment_id_in_subtree=True)` | home | category OCID | id, name, description, lifecycle state | snapshot (own scope, so a failure does not block recommendations) |
+| `optimizer.recommendations` | `OptimizerClient.list_recommendations(compartment_id_in_subtree=True)` | home | recommendation OCID | id, category, name, description, importance, status, estimated cost saving, resource counts (status → count), time created/updated | snapshot |
 | `audit.events` | `LogSearchClient.search_logs` on `search "<tenancy OCID>/_Audit_Include_Subcompartment"`; fallback `AuditClient.list_events` per compartment | **every subscribed region** | OCI event ID | normalized `AuditEvent` (AGENTS.md §5) | stream, checkpoint per (generation, tenancy, region) |
+
+`cost.monthly` (2026-10-27) is read once per scan from the **parent** with
+`UsageapiClient.request_summarized_usages` (MONTHLY, COST, current month plus 11 previous, grouped by
+`tenantId`, `tenantName`, `service`, `compartmentId`, `compartmentPath`, `compartment_depth=7`). It
+keeps month, tenant ID and name, service, compartment ID and path, computed amount and currency; no
+resource IDs or tags. Requires `read usage-report` in the parent only.
+
+`identity_domains.*` datasets are read from each tenancy's default identity domain unless the
+tenancy's collection settings enable all domains; Cloud Guard, Cloud Advisor, identities,
+policies and Audit can each be disabled per tenancy. Disabled datasets are not read and are not
+coverage gaps (`docs/scanning.md`, 2026-10-27).
 
 Notes:
 - **Users and groups.** The domain ID (SCIM `id`) is not the OCID. Audit events and IAM policies refer to

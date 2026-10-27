@@ -1,0 +1,28 @@
+{% extends 'base.html' %}{% import '_filters.html' as f %}{% import '_triage.html' as triage %}{% block content %}
+<p class="eyebrow">Cloud Guard</p><h1>Cloud Guard problems</h1>
+<p class="intro">Problems and Security Zone violations mirrored from Cloud Guard, the detector of record. Status and counts reflect the last complete collection for each tenancy.</p>
+{{ f.disabled(disabled) }}
+<div class="grid summary-grid">{% for t in summaries %}<section class="card summary">
+<h2>{{ t.label }}</h2>
+<p><span class="badge {{ 'complete' if t.enabled else 'partial' }}">{{ 'Enabled' if t.enabled else t.status | replace('_', ' ') | title }}</span>{% if t.reporting_region %}<small>Reporting region {{ t.reporting_region }}</small>{% endif %}</p>
+<div class="severity-counts">{% for severity, count in t.counts.items() %}<span class="badge sev-{{ severity }}">{{ severity }} {{ count }}</span>{% endfor %}</div>
+{% if t.gaps %}<p class="muted">{{ t.gaps | length }} Cloud Guard scope{{ '' if t.gaps | length == 1 else 's' }} incomplete · <a href="/data/coverage?status=failed&amp;tenancy={{ t.tenancy | urlencode }}">View coverage</a></p>{% endif %}
+</section>{% endfor %}</div>
+<form class="card filters" method="get" action="/cloud-guard">
+{{ f.choice('tenancy', 'Tenancy', filters.tenancy, tenancies) }}
+{{ f.choice('severity', 'Risk level', filters.severity, severities) }}
+{{ f.choice('source', 'Type', filters.source, [('cloud_guard', 'Cloud Guard'), ('security_zone', 'Security Zone')]) }}
+{{ f.choice('region', 'Region', filters.region, options.region) }}
+{{ f.choice('resource_type', 'Resource type', filters.resource_type, options.resource_type) }}
+{{ f.choice('status', 'Status', filters.status, [('open', 'Open'), ('resolved', 'Resolved'), ('ignored', 'Ignored'), ('closed', 'Closed')]) }}
+{{ f.text('q', 'Resource or rule contains', filters.q) }}
+{{ f.buttons('/cloud-guard', filtered, problems | length) }}
+</form>
+<section class="card table-wrap"><h2>Problems</h2><table><thead><tr><th>Risk</th><th>Resource</th><th>Type / detector rule</th><th>Tenancy / region</th><th>Detected</th><th>Status</th></tr></thead><tbody>
+{% for p in problems %}<tr><td><span class="badge sev-{{ p.finding.severity }}">{{ p.finding.severity }}</span></td><td>{{ p.resource_name }}<small>{{ p.resource_type }}</small><small>{{ p.finding.resource_ocid }}</small></td><td>{{ p.type }}<small>{{ p.detector_rule }}</small></td><td>{{ p.tenancy_label }}<small>{{ p.region }}</small></td><td>{{ p.first_detected | when }}<small>Last {{ p.last_detected | when }}</small></td><td>{{ triage.status(p.finding, admin, csrf, here) }}</td></tr>
+{% else %}<tr><td colspan="6">No Cloud Guard problems match. Check each tenancy's Cloud Guard status and coverage before concluding there are none.</td></tr>{% endfor %}
+</tbody></table></section>
+<section class="card table-wrap"><h2>Security Zones</h2><table><thead><tr><th>Zone</th><th>Tenancy</th><th>Compartment</th><th>Recipe</th><th>State</th></tr></thead><tbody>
+{% for z in zones %}<tr><td>{{ z.display_name or z.id }}<small>{{ z.id }}</small></td><td>{{ z.tenancy_label }}</td><td>{{ z.compartment_id }}</td><td>{{ z.security_recipe_id }}</td><td>{{ z.lifecycle_state }}</td></tr>
+{% else %}<tr><td colspan="5">No Security Zones collected.</td></tr>{% endfor %}
+</tbody></table></section>{% endblock %}

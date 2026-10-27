@@ -23,22 +23,35 @@ The parent additionally requires:
 
 ```text
 Allow group 'Default'/'ogc_scanner' to read organizations-family in tenancy
+Allow group 'Default'/'ogc_scanner' to read usage-report in tenancy
 ```
+
+`read usage-report` (2026-10-27) lets the parent read organization cost through the Usage API.
+Children do not need it: the parent's cost data covers the tenancies its billing includes.
+Existing installations add it to the parent's OGC policy by hand.
 
 | Read surface | SDK client operations |
 |---|---|
 | Identity/regions | IdentityClient get_tenancy/get_user/get_domain/list_compartments/list_region_subscriptions/list_policies/list_domains |
-| Every domain | IdentityDomainsClient list_users/list_groups/list_dynamic_resource_groups |
+| Every domain | IdentityDomainsClient list_users/list_groups/list_dynamic_resource_groups/list_api_keys |
 | Organization | OrganizationClient list_organizations/list_organization_tenancies |
 | Cloud Guard/Zones | CloudGuardClient get_configuration/list_problems/list_security_zones |
-| Advisor | OptimizerClient list_enrollment_statuses/list_recommendations |
+| Advisor | OptimizerClient list_categories/list_enrollment_statuses/list_recommendations |
 | Audit | AuditClient list_events per compartment and subscribed region |
+| Cost (parent only) | UsageapiClient request_summarized_usages (read-only query sent as POST; reviewed exception to the read-prefix rule) |
+
+`list_categories` (2026-10-22) is covered by the existing `read optimizer-api-family` grant.
+`list_api_keys` (2026-10-22) reads API-key metadata only (owner and creation date; OGC never stores
+the key or fingerprint). Whether `read users` authorizes it in every identity domain is a **live
+gate**; a denial is reported as an `identity_domains.api_keys` coverage gap and only blocks the
+`analysis.api_keys` rules. Do not broaden the grant to `manage` to obtain it.
 
 Resource names checked against [IAM with domains](https://docs.oracle.com/en-us/iaas/Content/Identity/policyreference/iampolicyreference.htm),
 [Cloud Guard policies](https://docs.oracle.com/en-us/iaas/Content/cloud-guard/using/policies.htm),
 [Security Zones](https://docs.oracle.com/en-us/iaas/Content/Security/Reference/securityzone_security.htm),
 [Audit](https://docs.oracle.com/en-us/iaas/Content/Audit/Tasks/viewinglogevents.htm),
 [Cloud Advisor](https://docs.oracle.com/en-us/iaas/Content/CloudAdvisor/Reference/cloudadvisorpolicyreference.htm)
+[Usage API](https://docs.oracle.com/en-us/iaas/Content/Billing/Concepts/costanalysisoverview.htm)
 and [organization access](https://docs.oracle.com/en-us/iaas/Content/General/organization/organization_required_iam_policy.htm).
 These are local grants, not proof of all-domain or WIF support; run the release gates before certification.
 The application groups grant no OCI administration permissions. Human self-service Me/group access
