@@ -6,6 +6,8 @@ from pathlib import Path
 from oci_governance_center.oci_clients import OPERATIONS
 
 ROOT = Path(__file__).resolve().parents[2] / "src" / "oci_governance_center"
+# Reviewed read-only queries whose SDK names do not use a read prefix (AGENTS.md §2.1).
+READ_QUERIES = frozenset({"request_summarized_usages"})
 
 
 def test_sdk_construction_and_http_are_confined_to_reviewed_modules():
@@ -31,8 +33,8 @@ def test_allowlist_matches_operations_referenced_by_collection_and_binding():
         if path.parent.name == "oci_clients":
             continue
         for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Attribute) and node.attr.startswith(
-                ("get_", "list_", "search_", "summarize_")
+            if isinstance(node, ast.Attribute) and (
+                node.attr.startswith(("get_", "list_", "search_", "summarize_", "request_"))
             ):
                 # Receiver-specific local methods: storage candidate access and secret unwrapping.
                 if node.attr == "get_secret_value":
@@ -45,3 +47,5 @@ def test_allowlist_matches_operations_referenced_by_collection_and_binding():
                 references.add(node.attr)
     allowed = set().union(*OPERATIONS.values())
     assert references == allowed, (references - allowed, allowed - references)
+    # Any other request_* operation must be reviewed before it can be allow-listed.
+    assert {op for op in allowed if op.startswith("request_")} <= READ_QUERIES

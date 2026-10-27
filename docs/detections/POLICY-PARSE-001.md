@@ -1,9 +1,10 @@
-> **Not implemented (2026-10-22).** The OSC statement parser was removed with that implementation.
-> OGC collects raw policy statements only; parsing arrives with Tier 4 policy analysis.
+> **Implemented (2026-10-22, Tier 4)** in `analyzers/policy.py` and `analyzers/identity.py`
+> under the `analysis.policy` scope, at LOW severity, keyed by policy OCID and normalized statement.
+> Tests: `tests/unit/test_policy_parser.py` and `tests/unit/test_identity_analysis.py`.
 
 # POLICY-PARSE-001 — Policy analysis incomplete
 
-Version: proposed 1 (2026-10-08). Status: planned (Tier 4).
+Version: proposed 1 (2026-10-08). Status: implemented (Tier 4).
 Source: policy. Severity: LOW. No CIS mapping.
 
 Inputs: policy OCID, attachment compartment, statement text, canonical statement identity and parser

@@ -281,3 +281,60 @@ def test_worker_logs_scan_lifecycle(service, parent, monkeypatch, caplog):
     assert "collecting Audit" in caplog.text
     assert f"Scan {ident} finished (status=completed)" in caplog.text
     assert parent.private_key.get_secret_value() not in caplog.text
+
+
+def test_dead_workers_tenancy_leases_are_released_with_its_interrupted_job(store, parent):
+    """A scheduler restarted mid-scan must not leave the next scan waiting for stale leases."""
+    generation = install(store, parent)
+    control = ScanControl(store)
+    control.enqueue(generation, "admin")
+    control.claim(generation, "dead-worker", now() - timedelta(minutes=3))
+    assert store.lease(generation, "tenancy-a", "dead-worker:collector", seconds=600)
+    queued = control.enqueue(generation, "admin", followup=True)
+    assert control.claim(generation, "new-worker")["id"] == queued
+    with store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM leases").fetchone()[0] == 0
+
+
+def test_live_leases_from_other_processes_still_block_claims(store, parent):
+    generation = install(store, parent)
+    control = ScanControl(store)
+    control.enqueue(generation, "admin")
+    control.claim(generation, "dead-worker", now() - timedelta(minutes=3))
+    # A CLI scan (no worker prefix) and a worker whose name merely shares a prefix stay locked.
+    assert store.lease(generation, "tenancy-a", "cli-scan", seconds=600)
+    assert store.lease(generation, "tenancy-b", "dead-worker-2:collector", seconds=600)
+    control.enqueue(generation, "admin", followup=True)
+    assert control.claim(generation, "new-worker") is None
+    assert control.locked_until() is not None
+    with store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM leases").fetchone()[0] == 2
+
+
+def test_worker_tags_tenancy_leases_with_its_identity(service, parent, monkeypatch):
+    worker = ScanWorker(service)
+    assert service.worker == worker.owner
+    generation = install(service.store, parent)
+    owners = []
+    original = service.store.lease
+
+    def record(generation, scope, owner, seconds=600):
+        owners.append(owner)
+        return original(generation, scope, owner, seconds)
+
+    monkeypatch.setattr(service.store, "lease", record)
+    monkeypatch.setattr(service, "confirm_key", lambda *_: (_ for _ in ()).throw(RuntimeError()))
+    service.scan_one(generation, parent, None, "identity")
+    assert owners and owners[0].startswith(worker.owner + ":")
+
+
+def test_scan_tab_explains_waiting_for_tenancy_locks(settings, service, parent, monkeypatch):
+    client = signed_in(settings, service, parent, monkeypatch, "ogc_viewer")
+    generation = service.store.state()[0]
+    control = ScanControl(service.store)
+    control.heartbeat()
+    control.enqueue(generation, "admin")
+    assert service.store.lease(generation, "tenancy-a", "cli-scan", seconds=600)
+    page = client.get("/scans").text
+    assert "Waiting for an earlier scan to release its tenancy locks" in page
+    assert "UTC" in page

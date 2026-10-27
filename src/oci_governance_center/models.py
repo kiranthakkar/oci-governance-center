@@ -150,8 +150,27 @@ class Identity(Model):
 Severity = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 SEVERITIES: tuple[Severity, ...] = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 FindingSource = Literal[
-    "cloud_guard", "security_zone", "advisor", "policy", "audit_anomaly", "coverage", "governance"
+    "cloud_guard",
+    "security_zone",
+    "advisor",
+    "policy",
+    "identity",
+    "audit_anomaly",
+    "coverage",
+    "governance",
 ]
+
+
+TriageState = Literal["ignored", "closed"]
+
+
+class Triage(Model):
+    """An administrator's decision on a finding, stored apart from the evaluated finding."""
+
+    state: TriageState
+    actor: str
+    at: str
+    reason: str = Field(default="", max_length=500)
 
 
 class Finding(Model):
@@ -164,7 +183,27 @@ class Finding(Model):
     severity: Severity
     title: str
     rule_id: str
+    description: str = ""
+    resource_ocid: str = ""
+    resource_type: str = ""
+    compartment_ocid: str = ""
+    # Pointer to the source record ("<dataset>/<record key>"), never the raw source body.
+    raw_ref: str = ""
     first_seen: str = ""
     last_seen: str = ""
     resolved_at: str | None = None
-    status: Literal["open", "resolved"] = "open"
+    # open/resolved come from evaluation; ignored/closed are the effective status under triage.
+    status: Literal["open", "resolved", "ignored", "closed"] = "open"
+    triage: Triage | None = None
+
+
+class ScanSettings(Model):
+    """What one tenancy collects; a tenancy without saved settings uses these defaults."""
+
+    cloud_guard: bool = True  # Cloud Guard configuration, problems and Security Zones
+    cloud_advisor: bool = True
+    identities: bool = True  # users, groups, dynamic groups and API keys
+    policies: bool = True
+    audit: bool = True
+    all_domains: bool = False  # identities from every identity domain, not only the default
+    cost: bool = True  # organization cost from the parent's Usage API; ignored for children

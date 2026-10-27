@@ -94,8 +94,10 @@ def test_read_only_boundary_blocks_aliases_getattr_and_wrapped_client():
             getattr(wrapped, forbidden)
     with pytest.raises(AttributeError):
         wrapped._client = raw
+    # The only exception is the reviewed read-only Usage API query (AGENTS.md §2.1).
     assert all(
         name.startswith(("get_", "list_", "search_", "summarize_"))
+        or name == "request_summarized_usages"
         for names in OPERATIONS.values()
         for name in names
     )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from functools import partial
@@ -10,16 +12,63 @@ from typing import Any
 import oci
 
 from ..diagnostics import PublicFailure, verification_step
-from ..models import Batch, Child, Domain, Record, Scope, domain_origin
+from ..models import Batch, Child, Domain, Record, ScanSettings, Scope, domain_origin
 from ..oci_clients import all_items, client
+
+MESSAGE_LIMIT = 300
+
+
+def oci_message(value: Any) -> str:
+    """OCI's short error explanation, made safe for storage and display.
+
+    Control characters are removed, whitespace collapsed, bearer tokens, JWTs and key blocks
+    redacted, and the text bounded. Templates HTML-escape it on display.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", value)
+    text = re.sub(
+        r"-----BEGIN[^-]*-----.*?(-----END[^-]*-----|$)", "[REDACTED KEY]", text, flags=re.S
+    )
+    text = re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "[REDACTED TOKEN]", text)
+    text = re.sub(r"(?i)\b(bearer|basic)\s+\S+", r"\1 [REDACTED]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[: MESSAGE_LIMIT - 1] + "…" if len(text) > MESSAGE_LIMIT else text
 
 
 def public_error(error: Exception) -> str:
-    """Return safe error status without OCI bodies or credentials."""
+    """Return a safe, specific error: status, code, operation, OCI's message and request ID."""
     if isinstance(error, PublicFailure):
         return str(error)
     if isinstance(error, oci.exceptions.ServiceError):
-        return f"OCI read failed (HTTP {error.status}); check local grants and service availability"
+        # Codes, operation names and request IDs are validated tokens. OCI's message is the
+        # service's short explanation (for example which parameter is invalid), sanitized above;
+        # no other part of the response body is kept. Oracle support can trace the request ID.
+        code = getattr(error, "code", None)
+        operation = getattr(error, "operation_name", None)
+        request_id = getattr(error, "request_id", None)
+        detail = (
+            f" {code}"
+            if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", code)
+            else ""
+        )
+        during = (
+            f" in {operation}"
+            if isinstance(operation, str) and re.fullmatch(r"[A-Za-z_]{1,64}", operation)
+            else ""
+        )
+        message = oci_message(getattr(error, "message", None))
+        explanation = f" OCI says: {message}" + ("" if message.endswith((".", "…")) else ".")
+        reference = (
+            f" Request ID: {request_id}."
+            if isinstance(request_id, str) and re.fullmatch(r"[A-Za-z0-9/._:-]{1,200}", request_id)
+            else ""
+        )
+        return (
+            f"OCI read failed (HTTP {error.status}{detail}){during}."
+            + (explanation if message else "")
+            + f" Check local grants and service availability.{reference}"
+        )
     return "Collection could not complete; check connectivity, domain setup and access"
 
 
@@ -55,6 +104,83 @@ def attempt(scope: Scope, read: Callable[[], list[Record]]) -> Batch:
         return Batch(scope=scope, records=read())
     except Exception as error:
         return Batch(scope=scope, complete=False, error=public_error(error))
+
+
+logger = logging.getLogger(__name__)
+
+# SCIM extension attributes for MFA, federation, service-user and sign-in state (no credentials).
+USER_ATTRIBUTES = ",".join(
+    (
+        "id",
+        "ocid",
+        "userName",
+        "active",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:mfa:User:mfaStatus",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:user:User:isFederatedUser",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:user:User:serviceUser",
+        "urn:ietf:params:scim:schemas:oracle:idcs:extension:userState:User:lastSuccessfulLoginDate",
+    )
+)
+
+
+def read_users(domains: Any) -> list[Record]:
+    """List one domain's users with MFA status, federation and last sign-in; requires read users."""
+    normalized: list[Record] = []
+    for user in all_items(domains.list_users, attributes=USER_ATTRIBUTES):
+        mfa = getattr(user, "urn_ietf_params_scim_schemas_oracle_idcs_extension_mfa_user", None)
+        kind = getattr(user, "urn_ietf_params_scim_schemas_oracle_idcs_extension_user_user", None)
+        state = getattr(
+            user, "urn_ietf_params_scim_schemas_oracle_idcs_extension_user_state_user", None
+        )
+        normalized.append(
+            Record(
+                key=str(user.id),
+                data={
+                    **pick(user, ("id", "ocid", "user_name", "active")),
+                    "mfa_status": getattr(mfa, "mfa_status", None),
+                    "federated": getattr(kind, "is_federated_user", None),
+                    "service_user": getattr(kind, "service_user", None),
+                    "last_successful_login": getattr(state, "last_successful_login_date", None),
+                },
+            )
+        )
+    # Counts only (no identifiers) so live acceptance can confirm the attributes are returned.
+    logger.info(
+        "Identity-domain users read: total=%s, mfa_status_reported=%s, sign_in_reported=%s",
+        len(normalized),
+        sum(r.data["mfa_status"] is not None for r in normalized),
+        sum(r.data["last_successful_login"] is not None for r in normalized),
+    )
+    return normalized
+
+
+def read_api_keys(domains: Any) -> list[Record]:
+    """List API-key metadata (owner, created); key material and fingerprints are never kept."""
+    normalized: list[Record] = []
+    # No attribute list: `meta` (creation time) and `user` are returned by default, and OCI
+    # rejected the explicit `id,ocid,user,meta` list with HTTP 400 in live testing (2026-10-22).
+    # The default response also carries the public key and fingerprint; they are dropped here.
+    for key in all_items(domains.list_api_keys):
+        owner = getattr(key, "user", None)
+        meta = getattr(key, "meta", None)
+        normalized.append(
+            Record(
+                key=str(key.id),
+                data={
+                    "id": key.id,
+                    "ocid": getattr(key, "ocid", None),
+                    "user_id": getattr(owner, "value", None),
+                    "user_ocid": getattr(owner, "ocid", None),
+                    "created": getattr(meta, "created", None),
+                },
+            )
+        )
+    logger.info(
+        "Identity-domain API keys read: total=%s, with_owner=%s",
+        len(normalized),
+        sum(r.data["user_id"] is not None for r in normalized),
+    )
+    return normalized
 
 
 def discover(signer: Any, domain: Domain) -> list[Child]:
@@ -101,10 +227,74 @@ def discover(signer: Any, domain: Domain) -> list[Child]:
     ]
 
 
-def inventory(signer: Any, domain: Domain, family: str = "all") -> Iterator[Batch]:
-    """Read IAM, governance and domain inventory using local tenancy-scoped read permissions."""
+def is_default(record: Record, domain: Domain) -> bool:
+    """Whether an identity.domains record is the tenancy's default domain."""
+    return record.key == domain.domain_ocid or str(record.data.get("type") or "") == "DEFAULT"
+
+
+class Trace:
+    """Log one tenancy's collection phases: started, then completed with any coverage gaps.
+
+    Messages name the tenancy and phase, plus each incomplete dataset with its sanitized error;
+    never identifiers, records or response bodies.
+    """
+
+    def __init__(self, tenancy: str = "") -> None:
+        self.tenancy = tenancy
+        self.current = ""
+        self.gaps = 0
+
+    def start(self, phase: str) -> None:
+        self.finish()
+        self.current, self.gaps = phase, 0
+        logger.info("tenancy: %s %s scan started", self.tenancy, phase)
+
+    def seen(self, batch: Batch) -> Batch:
+        if not batch.complete:
+            self.gaps += 1
+            # batch.error is the sanitized public_error text, safe for logs and the UI.
+            logger.warning(
+                "tenancy: %s %s scan: %s incomplete: %s",
+                self.tenancy,
+                self.current,
+                batch.scope.dataset,
+                batch.error,
+            )
+        return batch
+
+    def finish(self) -> None:
+        if self.current:
+            outcome = (
+                f"completed with {self.gaps} incomplete scope{'s' if self.gaps != 1 else ''}"
+                " (see Coverage)"
+                if self.gaps
+                else "completed"
+            )
+            logger.info("tenancy: %s %s scan %s", self.tenancy, self.current, outcome)
+        self.current = ""
+
+    def fail(self) -> None:
+        if self.current:
+            logger.warning("tenancy: %s %s scan failed", self.tenancy, self.current)
+        self.current = ""
+
+
+def inventory(
+    signer: Any,
+    domain: Domain,
+    family: str = "all",
+    settings: ScanSettings | None = None,
+    trace: Trace | None = None,
+) -> Iterator[Batch]:
+    """Read IAM, governance and domain inventory using local tenancy-scoped read permissions.
+
+    Datasets disabled in the tenancy's scan settings are not read and yield no batch.
+    """
+    settings = settings or ScanSettings()
+    trace = trace or Trace()
     tenancy, region = domain.tenancy_ocid, domain.home_region
     identity = client("identity", signer, region)
+    trace.start("Compartment")
     compartments_scope = Scope(tenancy=tenancy, dataset="identity.compartments", region=region)
     compartments = attempt(
         compartments_scope,
@@ -136,28 +326,32 @@ def inventory(signer: Any, domain: Domain, family: str = "all") -> Iterator[Batc
                 "region_name",
             ),
         )
-        for compartment in compartment_ids:
-            yield attempt(
-                Scope(
-                    tenancy=tenancy,
-                    dataset="identity.policies",
-                    region=region,
-                    compartment=compartment,
-                ),
-                partial(
-                    read_records,
-                    identity.list_policies,
-                    (
-                        "id",
-                        "compartment_id",
-                        "name",
-                        "statements",
-                        "lifecycle_state",
-                        "time_created",
+        if settings.policies:
+            trace.start("IAM policy")
+            for compartment in compartment_ids:
+                yield attempt(
+                    Scope(
+                        tenancy=tenancy,
+                        dataset="identity.policies",
+                        region=region,
+                        compartment=compartment,
                     ),
-                    compartment,
-                ),
-            )
+                    partial(
+                        read_records,
+                        identity.list_policies,
+                        (
+                            "id",
+                            "compartment_id",
+                            "name",
+                            "statements",
+                            "lifecycle_state",
+                            "time_created",
+                        ),
+                        compartment,
+                    ),
+                )
+        trace.start("Identity")
+        for compartment in compartment_ids:
             domain_batch = attempt(
                 Scope(
                     tenancy=tenancy,
@@ -186,6 +380,12 @@ def inventory(signer: Any, domain: Domain, family: str = "all") -> Iterator[Batc
             for record in domain_batch.records:
                 if record.data.get("lifecycle_state") != "ACTIVE":
                     continue
+                # Only the default domain is read unless all domains are enabled; skipped
+                # domains are not collected, which analysis treats as unknown, never empty.
+                if not settings.identities or not (
+                    settings.all_domains or is_default(record, domain)
+                ):
+                    continue
                 try:
                     endpoint = domain_origin(str(record.data["url"]))
                     domains = client("domains", signer, region, endpoint)
@@ -208,12 +408,7 @@ def inventory(signer: Any, domain: Domain, family: str = "all") -> Iterator[Batc
                         region=region,
                         domain=record.key,
                     ),
-                    partial(
-                        read_records,
-                        domains.list_users,
-                        ("id", "ocid", "user_name"),
-                        attributes="id,ocid,userName",
-                    ),
+                    partial(read_users, domains),
                 )
                 yield users
 
@@ -262,107 +457,161 @@ def inventory(signer: Any, domain: Domain, family: str = "all") -> Iterator[Batc
                         attributes="id,ocid,displayName,matchingRule",
                     ),
                 )
+                # Whether `read users` permits listing domain API keys is a live gate; a denial
+                # is a coverage gap, never proof that users have no keys.
+                yield attempt(
+                    Scope(
+                        tenancy=tenancy,
+                        dataset="identity_domains.api_keys",
+                        region=region,
+                        domain=record.key,
+                    ),
+                    partial(read_api_keys, domains),
+                )
     if family not in {"all", "governance"}:
         return
-    guard = client("guard", signer, region)
-    configuration = attempt(
-        Scope(tenancy=tenancy, dataset="cloud_guard.configuration", region=region),
-        lambda: [
-            Record(
-                key=tenancy,
-                data=pick(guard.get_configuration(tenancy).data, ("status", "reporting_region")),
-            )
-        ],
-    )
-    yield configuration
-    if configuration.complete:
-        reporting = configuration.records[0].data.get("reporting_region") or region
-        reporting_guard = client("guard", signer, reporting)
-
-        def read_problems() -> list[Record]:
-            options = {
-                "compartment_id_in_subtree": True,
-                "access_level": "ACCESSIBLE",
-                "lifecycle_detail": "OPEN",
-            }
-            values = all_items(reporting_guard.list_problems, tenancy, **options)
-            zones = {
-                value.id
-                for value in all_items(
-                    reporting_guard.list_problems,
-                    tenancy,
-                    problem_category="SECURITY_ZONE",
-                    **options,
-                )
-            }
-            projected = records(
-                values,
-                (
-                    "id",
-                    "compartment_id",
-                    "resource_id",
-                    "resource_type",
-                    "resource_name",
-                    "region",
-                    "risk_level",
-                    "detector_id",
-                    "detector_rule_id",
-                    "labels",
-                    "lifecycle_state",
-                    "lifecycle_detail",
-                    "time_first_detected",
-                    "time_last_detected",
-                ),
-            )
-            return [
+    if settings.cloud_guard:
+        trace.start("Cloud Guard")
+        guard = client("guard", signer, region)
+        configuration = attempt(
+            Scope(tenancy=tenancy, dataset="cloud_guard.configuration", region=region),
+            lambda: [
                 Record(
-                    key=record.key,
-                    data={
-                        **record.data,
-                        "problem_category": "SECURITY_ZONE"
-                        if record.key in zones
-                        else "CLOUD_GUARD",
-                    },
+                    key=tenancy,
+                    data=pick(
+                        guard.get_configuration(tenancy).data, ("status", "reporting_region")
+                    ),
                 )
-                for record in projected
-            ]
-
-        yield attempt(
-            Scope(tenancy=tenancy, dataset="cloud_guard.problems", region=reporting), read_problems
+            ],
         )
-        for compartment in compartment_ids:
-            yield attempt(
-                Scope(
-                    tenancy=tenancy,
-                    dataset="security_zones.zones",
-                    region=reporting,
-                    compartment=compartment,
-                ),
-                partial(
-                    read_records,
-                    reporting_guard.list_security_zones,
+        yield configuration
+        if configuration.complete:
+            reporting = configuration.records[0].data.get("reporting_region") or region
+            reporting_guard = client("guard", signer, reporting)
+
+            def read_problems() -> list[Record]:
+                options = {
+                    "compartment_id_in_subtree": True,
+                    "access_level": "ACCESSIBLE",
+                    "lifecycle_detail": "OPEN",
+                }
+                values = all_items(reporting_guard.list_problems, tenancy, **options)
+                zones = {
+                    value.id
+                    for value in all_items(
+                        reporting_guard.list_problems,
+                        tenancy,
+                        problem_category="SECURITY_ZONE",
+                        **options,
+                    )
+                }
+                projected = records(
+                    values,
                     (
                         "id",
                         "compartment_id",
-                        "display_name",
-                        "security_recipe_id",
+                        "resource_id",
+                        "resource_type",
+                        "resource_name",
+                        "region",
+                        "risk_level",
+                        "risk_score",
+                        "target_id",
+                        "detector_id",
+                        "detector_rule_id",
+                        "labels",
                         "lifecycle_state",
+                        "lifecycle_detail",
+                        "time_first_detected",
+                        "time_last_detected",
                     ),
-                    compartment,
-                ),
+                )
+                return [
+                    Record(
+                        key=record.key,
+                        data={
+                            **record.data,
+                            "problem_category": "SECURITY_ZONE"
+                            if record.key in zones
+                            else "CLOUD_GUARD",
+                        },
+                    )
+                    for record in projected
+                ]
+
+            yield attempt(
+                Scope(tenancy=tenancy, dataset="cloud_guard.problems", region=reporting),
+                read_problems,
             )
-    optimizer = client("optimizer", signer, region)
-    yield attempt(
-        Scope(tenancy=tenancy, dataset="optimizer.enrollment", region=region),
-        lambda: records(
-            all_items(optimizer.list_enrollment_statuses, tenancy),
-            ("id", "status", "status_reason"),
-        ),
-    )
-    yield attempt(
-        Scope(tenancy=tenancy, dataset="optimizer.recommendations", region=region),
-        lambda: records(
-            all_items(optimizer.list_recommendations, tenancy, True),
-            ("id", "category_id", "name", "importance", "status", "time_updated"),
-        ),
-    )
+            for compartment in compartment_ids:
+                yield attempt(
+                    Scope(
+                        tenancy=tenancy,
+                        dataset="security_zones.zones",
+                        region=reporting,
+                        compartment=compartment,
+                    ),
+                    partial(
+                        read_records,
+                        reporting_guard.list_security_zones,
+                        (
+                            "id",
+                            "compartment_id",
+                            "display_name",
+                            "security_recipe_id",
+                            "lifecycle_state",
+                        ),
+                        compartment,
+                    ),
+                )
+    if settings.cloud_advisor:
+        trace.start("Cloud Advisor")
+        optimizer = client("optimizer", signer, region)
+        yield attempt(
+            Scope(tenancy=tenancy, dataset="optimizer.enrollment", region=region),
+            lambda: records(
+                all_items(optimizer.list_enrollment_statuses, tenancy),
+                ("id", "status", "status_reason"),
+            ),
+        )
+        yield attempt(
+            Scope(tenancy=tenancy, dataset="optimizer.categories", region=region),
+            partial(
+                read_records,
+                optimizer.list_categories,
+                ("id", "name", "description", "lifecycle_state"),
+                tenancy,
+                True,
+            ),
+        )
+
+        def read_recommendations() -> list[Record]:
+            normalized: list[Record] = []
+            for value in all_items(optimizer.list_recommendations, tenancy, True):
+                data = pick(
+                    value,
+                    (
+                        "id",
+                        "category_id",
+                        "name",
+                        "description",
+                        "importance",
+                        "status",
+                        "estimated_cost_saving",
+                        "time_created",
+                        "time_updated",
+                    ),
+                )
+                # Resource counts are nested SDK objects; keep only status -> count.
+                data["resource_counts"] = {
+                    str(count.status): int(count.count or 0)
+                    for count in (getattr(value, "resource_counts", None) or [])
+                    if getattr(count, "status", None)
+                }
+                normalized.append(Record(key=str(value.id), data=data))
+            return normalized
+
+        yield attempt(
+            Scope(tenancy=tenancy, dataset="optimizer.recommendations", region=region),
+            read_recommendations,
+        )

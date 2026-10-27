@@ -25,6 +25,7 @@ class ScanWorker:
         self.service = service
         self.control = ScanControl(service.store)
         self.owner = secrets.token_hex(16)
+        service.worker = self.owner
 
     def execute(self, job: dict[str, Any]) -> None:
         """Collect every enabled target, including Audit, then report complete/partial coverage."""

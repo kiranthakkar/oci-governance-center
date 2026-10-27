@@ -44,6 +44,12 @@ records pending filesystem cleanup. Old server-held organization data and artifa
 cleanup failures prevent completion and are retried on startup. No previously downloaded files can
 be recalled. New-parent authorization cannot reuse an old parent's session role.
 
+Findings, Inventory, Coverage and Activity pages filter by tenancy. Findings also filter by severity,
+finding type (source), rule, status and title; Inventory and Coverage by dataset and region (plus name
+or result); Activity by region, principal, event/action and success or failure. Filters are server-side
+GET parameters validated against known values. Activity filters run in SQL before the 200-event limit,
+so older matching events stay findable, and LIKE wildcards in search text are matched literally.
+
 ## Verification performed
 
 - Python lint, formatting, strict types and network-blocked unit/integration-style HTTP tests.
@@ -76,10 +82,14 @@ be recalled. New-parent authorization cannot reuse an old parent's session role.
    administrator-applied Resource Manager bundle where the Console lacks these controls.
 
 The code does not advertise unsupported tiers or silently collect less than a requested higher tier.
-This initial runtime exposes Tier 1 collection only. Tier 2 guardrail data, full Tier 3 attribution,
-Tier 4 policy/admin-role analysis, and Tier 5 anomaly detection still require implementation and their
-specified positive/negative/boundary tests before they can be enabled. No effective-permissions
-completeness claim is made. Full backup/restore tooling and wider Audit reconciliation are also not
+The runtime exposes Tier 1 collection plus Tier 4 policy and identity analysis (2026-10-22): a
+tolerant statement parser and the POL-*/IAM-* rules in `docs/detections/`, persisted as findings in
+four fail-closed analysis scopes. Identity collection adds user MFA status, federation/service-user
+flags, last successful sign-in and API-key metadata (creation date only; never key material). Tier 2
+guardrail data, full Tier 3 attribution, Tier 4 admin-role grants and Tier 5 anomaly detection still
+require implementation and their specified positive/negative/boundary tests before they can be
+enabled. No effective-permissions completeness claim is made: where-conditions are recorded but not
+evaluated, and policy aliases are not substituted. Full backup/restore tooling and wider Audit reconciliation are also not
 implemented; replacement already removes artifacts in the managed backup/export directories.
 
 ## Backlog retained from the interview
@@ -162,3 +172,33 @@ with immutable finish-time snapshots, failure-first ordering and earlier-attempt
 Administrators and viewers can read diagnostics; anonymous users cannot. Snapshot writes require
 an unexpired owned job and organization fence. Replacement and retention remove associated snapshots.
 Raw debug logs and credentials remain outside the UI.
+
+## Navigation and tabs (2026-10-22)
+
+Overview, Coverage, Cloud Guard (per-tenancy status, mirrored problems with risk/type/region/resource
+filters, Security Zones), Cloud Advisor (enrollment, recommendations with category names, estimated
+savings and resource counts), Resource organization (collapsible compartment tree per tenancy without
+JavaScript; deleted compartments optional; stale/missing collection is shown explicitly), Identity
+(users, groups, dynamic groups, policies and policy analysis, filterable by tenancy and identity
+domain), Activity, Scan and Configuration. The former Findings and Inventory pages remain reachable
+at `/data/findings` and `/data/records` and through JSON exports but are no longer in the menu.
+
+## Scan settings, policy counts and triage (2026-10-27)
+
+Per-tenancy collection settings on the Scan tab (Cloud Guard, Cloud Advisor, identities with
+default-domain-only or all domains, policies, Audit); the default reads only each tenancy's
+default identity domain. Unread domains make policy subjects unknown, never stale or unused.
+Resource organization shows policy statements per compartment and for its hierarchy
+(the compartment plus every compartment above it), hidden when policy collection is incomplete
+or disabled. Administrators can ignore, close or reopen any finding (`docs/scanning.md`).
+Mocked tests only.
+
+## Cost visibility (2026-10-27)
+
+Cost tab with monthly cost for 12 months by tenancy, service and compartment (tree with rolled-up
+totals), read from the parent's Usage API (`request_summarized_usages`, reviewed read-only query
+exception). Parent-only grant `read usage-report`. Mocked tests only; live gates: child tenancies
+in parent data, `compartmentPath` format/depth and paging.
+
+Additional live gates: `ListApiKeys` authorization under `read users` in every domain; the MFA,
+federation, service-user and last-sign-in SCIM attributes; and `ListCategories` names.

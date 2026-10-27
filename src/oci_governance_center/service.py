@@ -6,7 +6,8 @@ import json
 import logging
 import secrets
 import threading
-from collections.abc import Iterator
+from collections import defaultdict
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -15,9 +16,17 @@ from typing import Any
 import oci
 
 from .analyzers import governance
+from .analyzers.identity import (
+    Inventory,
+    activity_findings,
+    api_key_findings,
+    identity_findings,
+    policy_findings,
+)
 from .auth.scanner import Exchange, ScanAccessFailure, api_signer, bind_identity, verify_parent
 from .collectors.audit import read_interval
-from .collectors.inventory import discover, inventory, public_error
+from .collectors.cost import costs
+from .collectors.inventory import Trace, discover, inventory, public_error
 from .config import Settings
 from .diagnostics import verification_step
 from .models import (
@@ -27,6 +36,7 @@ from .models import (
     Domain,
     Finding,
     Parent,
+    ScanSettings,
     Scope,
     domain_origin,
     now,
@@ -40,12 +50,50 @@ logger = logging.getLogger(__name__)
 LEASE_SECONDS = 600
 LEASE_RENEW_SECONDS = 60
 
+# Identity analysis scopes and the datasets each needs complete (fail closed otherwise).
+ANALYSIS_INPUTS = {
+    "analysis.policy": frozenset(
+        {
+            "identity.compartments",
+            "identity.policies",
+            "identity.domains",
+            "identity_domains.groups",
+            "identity_domains.dynamic_groups",
+        }
+    ),
+    "analysis.identity": frozenset(
+        {
+            "identity.compartments",
+            "identity.domains",
+            "identity_domains.users",
+            "identity_domains.groups",
+        }
+    ),
+    "analysis.api_keys": frozenset(
+        {
+            "identity.compartments",
+            "identity.domains",
+            "identity_domains.users",
+            "identity_domains.api_keys",
+        }
+    ),
+}
+REQUIRED_PRESENT = {
+    "analysis.policy": frozenset(
+        {"identity.compartments", "identity.policies", "identity.domains"}
+    ),
+    "analysis.identity": frozenset({"identity.compartments", "identity.domains"}),
+    "analysis.api_keys": frozenset({"identity.compartments", "identity.domains"}),
+}
+
 
 class Service:
     """Read-only tenancy operations; only local application state is modified."""
 
     def __init__(self, settings: Settings, store: Store) -> None:
         self.settings, self.store = settings, store
+        # Set by the scan worker so its tenancy leases can be released if it dies mid-scan.
+        self.worker = ""
 
     def candidate(self, owner: str, parent: Parent, expected_generation: int | None = None) -> str:
         """Verify candidate credentials; activation also requires human admin OIDC."""
@@ -277,13 +325,14 @@ class Service:
         )
         # Failures after authentication are recorded here and cleared by the next success.
         runner = scope.model_copy(update={"dataset": family + ".runner"})
-        owner = secrets.token_hex(16)
+        owner = (f"{self.worker}:" if self.worker else "") + secrets.token_hex(16)
         lease_key = json.dumps([generation, domain.tenancy_ocid])
         if not self.store.lease(generation, lease_key, owner, seconds=LEASE_SECONDS):
             return
         lease = (lease_key, owner)
         exchange: Exchange | None = None
         revision = child.revision if child else None
+        trace = Trace(child.name if child else parent.name)
         authenticated = False
         try:
             with self.kept_lease(lease_key, owner):
@@ -301,14 +350,36 @@ class Service:
                 self.store.publish(generation, Batch(scope=scope), revision, lease)
                 authenticated = True
                 failed = False
+                settings = self.store.scan_settings(domain.tenancy_ocid)
                 if family == "audit":
-                    self.audit(generation, signer, domain, revision, lease)
+                    # Audit disabled in the scan settings is not collected and is no coverage gap.
+                    if settings.audit:
+                        trace.start("Audit")
+                        self.audit(generation, signer, domain, revision, lease)
+                        if settings.identities:
+                            self.activity_analysis(generation, domain, revision, lease)
+                        trace.finish()
                 else:
-                    for batch in inventory(signer, domain, family):
+                    identity: list[Batch] = []
+                    for batch in inventory(signer, domain, family, settings, trace):
+                        trace.seen(batch)
                         self.store.publish(generation, batch, revision, lease)
                         if batch.complete:
                             self.findings(generation, batch, revision, lease)
                         failed |= not batch.complete
+                        if batch.scope.dataset.startswith(("identity.", "identity_domains.")):
+                            identity.append(batch)
+                    if family in {"all", "identity"}:
+                        self.identity_analysis(
+                            generation, domain, identity, revision, lease, settings
+                        )
+                    # Organization cost is read once, from the parent; it covers the children.
+                    trace.finish()
+                    if child is None and family in {"all", "governance"} and settings.cost:
+                        trace.start("Cost Analysis")
+                        cost = trace.seen(costs(signer, domain, now()))
+                        self.store.publish(generation, cost, revision, lease)
+                        trace.finish()
                 if self.store.has_coverage(runner):
                     self.store.publish(generation, Batch(scope=runner), revision, lease)
                 if child:
@@ -316,9 +387,11 @@ class Service:
                         generation, child, "partial" if failed else "active", "", lease
                     )
         except StaleWork as error:
+            trace.fail()
             # Expected after pause, reconfiguration, replacement or lease loss; never silent.
             logger.info("Collection stopped for a changed scope: %s", error)
         except Exception as error:
+            trace.fail()
             try:
                 _, _, blocked = self.store.state()
                 if not blocked:
@@ -558,14 +631,24 @@ class Service:
         """Derive governance findings from complete scopes without calling OCI."""
         if not batch.complete:
             return
-        findings = governance(batch)
+        self.persist_findings(generation, batch.scope, governance(batch), revision, lease)
+
+    def persist_findings(
+        self,
+        generation: int,
+        scope: Scope,
+        findings: list[Finding],
+        revision: int | None,
+        lease: tuple[str, str] | None = None,
+    ) -> None:
+        """Open/refresh findings for one completely evaluated scope and resolve absent ones."""
         timestamp = now().isoformat()
         with self.store.db() as db:
-            self.store.collection_fence(db, generation, batch.scope.tenancy, revision, lease)
+            self.store.collection_fence(db, generation, scope.tenancy, revision, lease)
             stored = [
                 Finding.model_validate_json(row["data"])
                 for row in db.execute(
-                    "SELECT data FROM findings WHERE scope=?", (batch.scope.key,)
+                    "SELECT data FROM findings WHERE scope=?", (scope.key,)
                 ).fetchall()
             ]
             existing = {f.id: f for f in stored if f.source != "coverage"}
@@ -581,7 +664,7 @@ class Service:
                 )
                 db.execute(
                     "INSERT OR REPLACE INTO findings VALUES(?,?,?)",
-                    (item.id, batch.scope.key, item.model_dump_json()),
+                    (item.id, scope.key, item.model_dump_json()),
                 )
             present = {item.id for item in findings}
             for ident, old in existing.items():
@@ -592,3 +675,154 @@ class Service:
                     db.execute(
                         "UPDATE findings SET data=? WHERE id=?", (resolved.model_dump_json(), ident)
                     )
+
+    def identity_analysis(
+        self,
+        generation: int,
+        domain: Domain,
+        batches: list[Batch],
+        revision: int | None,
+        lease: tuple[str, str] | None = None,
+        settings: ScanSettings | None = None,
+    ) -> None:
+        """Run policy/identity rules on this run's identity batches; incomplete inputs fail closed.
+
+        A run that produced no identity batches has nothing to evaluate and claims nothing.
+        Scopes disabled in the scan settings are neither evaluated nor reported as gaps. Groups
+        in identity domains that were not read are unknown to the rules, never missing.
+        """
+        if not batches:
+            return
+        settings = settings or ScanSettings()
+        enabled = {
+            "analysis.policy": settings.policies,
+            "analysis.identity": settings.identities,
+            "analysis.api_keys": settings.identities,
+        }
+        records: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for batch in batches:
+            for record in batch.records:
+                records[batch.scope.dataset].append(
+                    {"scope": batch.scope.model_dump(), "key": record.key, "data": record.data}
+                )
+        complete: dict[str, set[str]] = defaultdict(set)
+        for batch in batches:
+            if batch.complete and batch.scope.domain:
+                complete[batch.scope.dataset].add(batch.scope.domain)
+        scanned = complete["identity_domains.groups"] & complete["identity_domains.dynamic_groups"]
+        inventory = Inventory(domain.tenancy_ocid, records, scanned)
+        instant = now()
+        rules: dict[str, Callable[[str], list[Finding]]] = {
+            "analysis.policy": lambda scope: policy_findings(inventory, scope),
+            "analysis.identity": lambda scope: identity_findings(inventory, scope),
+            "analysis.api_keys": lambda scope: api_key_findings(
+                inventory, scope, instant, self.settings.api_key_max_age_days
+            ),
+        }
+        present = {batch.scope.dataset for batch in batches}
+        for dataset, run in rules.items():
+            if not enabled[dataset]:
+                continue
+            scope = Scope(tenancy=domain.tenancy_ocid, dataset=dataset, region=domain.home_region)
+            inputs = ANALYSIS_INPUTS[dataset]
+            if not settings.identities:
+                inputs = frozenset(i for i in inputs if not i.startswith("identity_domains."))
+            failed = sorted(
+                {b.scope.dataset for b in batches if b.scope.dataset in inputs and not b.complete}
+                | (REQUIRED_PRESENT[dataset] - present)
+            )
+            if failed:
+                self.store.publish(
+                    generation,
+                    Batch(
+                        scope=scope,
+                        complete=False,
+                        error="Analysis skipped until these inputs are complete: "
+                        + ", ".join(failed),
+                    ),
+                    revision,
+                    lease,
+                )
+                continue
+            self.persist_findings(generation, scope, run(scope.key), revision, lease)
+            self.store.publish(generation, Batch(scope=scope), revision, lease)
+
+    def audit_window_complete(self, generation: int, tenancy: str, since: datetime) -> bool:
+        """Whether every subscribed region has complete Audit coverage from since until now."""
+        if self.settings.retention_days < self.settings.inactive_days:
+            return False
+        scopes = [
+            (json.loads(row["scope"]), row["status"])
+            for row in self.store.rows("coverage", generation)
+        ]
+        forward = [
+            (s, st)
+            for s, st in scopes
+            if s["tenancy"] == tenancy and s["dataset"] == "audit.events"
+        ]
+        if not forward or any(status != "complete" for _, status in forward):
+            return False
+        for scope, _ in forward:
+            backfill = next(
+                (
+                    status
+                    for s, status in scopes
+                    if s["tenancy"] == tenancy
+                    and s["region"] == scope["region"]
+                    and s["dataset"] == "audit.backfill"
+                ),
+                None,
+            )
+            target = self.store.checkpoint(
+                Scope(tenancy=tenancy, dataset="audit.backfill.target", region=scope["region"])
+            )
+            # Covered if history is finished, or the window begins after forward collection did.
+            if backfill != "complete" and not (target and datetime.fromisoformat(target) <= since):
+                return False
+        return True
+
+    def activity_analysis(
+        self,
+        generation: int,
+        domain: Domain,
+        revision: int | None,
+        lease: tuple[str, str] | None = None,
+    ) -> None:
+        """Run sign-in/Audit inactivity rules; skipped unless identity and Audit are complete."""
+        tenancy = domain.tenancy_ocid
+        scope = Scope(tenancy=tenancy, dataset="analysis.activity", region=domain.home_region)
+        instant = now()
+        since = instant - timedelta(days=self.settings.inactive_days)
+        identity = Scope(tenancy=tenancy, dataset="analysis.identity", region=domain.home_region)
+        coverage = {row["scope"]: row["status"] for row in self.store.rows("coverage", generation)}
+        problem = ""
+        if coverage.get(identity.key) != "complete":
+            problem = "identity inventory (users and groups) is incomplete"
+        elif not self.audit_window_complete(generation, tenancy, since):
+            problem = (
+                f"Audit coverage does not yet span the last {self.settings.inactive_days} days"
+            )
+        if problem:
+            self.store.publish(
+                generation,
+                Batch(scope=scope, complete=False, error="Activity analysis skipped: " + problem),
+                revision,
+                lease,
+            )
+            return
+        records: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in self.store.records(generation, include=("identity.", "identity_domains.")):
+            record_scope = json.loads(row["scope"])
+            if record_scope["tenancy"] == tenancy:
+                records[record_scope["dataset"]].append(
+                    {"scope": record_scope, "key": row["key"], "data": json.loads(row["data"])}
+                )
+        findings = activity_findings(
+            Inventory(tenancy, records),
+            scope.key,
+            instant,
+            self.settings.inactive_days,
+            self.store.audit_principals(generation, tenancy, since.isoformat()),
+        )
+        self.persist_findings(generation, scope, findings, revision, lease)
+        self.store.publish(generation, Batch(scope=scope), revision, lease)

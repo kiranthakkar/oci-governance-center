@@ -22,6 +22,7 @@ place and makes activity observable. It is not a security scanner (see non-goals
 | 2 | **Centralized governance** | Aggregate across all tenancies: **Cloud Guard problems**, **Security Zone violations**, and **Cloud Advisor (Optimizer) recommendations**. |
 | 3 | **Policy review & scanning** | Pull every IAM policy in every compartment of every tenancy, parse statements, flag risky grants (CIS OCI Benchmark + our own rules). |
 | 4 | **Audit log analytics** | Query Audit logs across all child tenancies and regions, normalize events, and detect anomalies. |
+| 5 | **Cost visibility** | Read-only monthly cost for the parent and children from the parent's Usage API, viewable by tenancy, service and compartment (2026-10-27). |
 
 Data is collected in **tiers** (`docs/collection.md`): **1** inventory and oversight · **2** guardrail
 coverage · **3** change over time · **4** policy analysis (pillar 3 rules) · **5** activity analytics
@@ -36,8 +37,11 @@ current implementation gates are in `docs/architecture.md` §4.
   read-only.** It shows the IAM policies it needs; humans apply them.
 - Multi-cloud support.
 - Replacing Cloud Guard. We aggregate and correlate; Cloud Guard remains the detector of record.
-- Security-scanner data: credential hygiene (MFA status, key/token age), expiring keys or certificates,
-  network or bucket exposure, vulnerability scanning and Data Safe results.
+- Security-scanner data: key or token **material**, credential types other than API signing keys
+  (auth tokens, customer secret keys, SMTP/DB credentials), expiring certificates, network or bucket
+  exposure, vulnerability scanning and Data Safe results. **In scope since 2026-10-22:** per-user MFA
+  status, federation/service-user flags, last successful sign-in and API-key creation date (age),
+  used only for identity analysis. Key material and fingerprints are never stored.
 - Workload, service and flow-log contents; metrics.
 - Creating or enforcing Security Zones from the parent (a governance use case, deferred; OGC stays
   read-only).
@@ -49,7 +53,9 @@ current implementation gates are in `docs/architecture.md` §4.
 This is a security tool with read access to an entire Organization. Treat it like a privileged system.
 
 1. **Read-only against tenancies.** Collectors must only call `get_*`, `list_*`, `summarize_*`, `search_*`
-   resource APIs. Mutating OCI resource calls are prohibited throughout **all** of `src/`, including
+   resource APIs. The single reviewed exception is the Usage API query
+   `UsageapiClient.request_summarized_usages` (a side-effect-free query sent as POST); any other
+   `request_*` operation fails the boundary tests until reviewed. Mutating OCI resource calls are prohibited throughout **all** of `src/`, including
    the control plane; moving one outside collectors does not make it permitted. A future write feature
    requires an explicit design change. SDK constructors/signers and OIDC credential issuance are
    separately reviewed infrastructure operations. Enforced by the explicit allow-list in
@@ -101,10 +107,15 @@ must not be restored. Current source modules:
 - `auth/`: independent human OIDC, verified JWTs and parent API-key and encrypted child OAuth/WIF credentials.
 - `oci_clients/`: official SDK construction, read-operation allow-list and pagination adapters.
 - `provisioning/`: administrator-applied Terraform and manual guides; no runtime resource writes.
-- `storage.py`: SQLite, encrypted credentials/sessions, scoped snapshots and durable Audit events.
+- `storage.py`: SQLite, encrypted credentials/sessions, scoped snapshots, durable Audit events,
+  per-tenancy scan settings and finding triage.
 - `service.py`: enrollment, organization discovery, child lifecycle and collection orchestration.
-- `collectors/`, `analyzers.py`, `severity.py`: explicit field projections and pure governance analysis.
-- `web/`: FastAPI routes, server-rendered templates and static CSS; no frontend framework.
+- `collectors/`, `severity.py`: explicit field projections and source severity mapping;
+  `collectors/cost.py` reads organization cost from the parent's Usage API.
+- `analyzers/`: pure analysis that never calls OCI — `__init__` (governance mirroring), `policy.py`
+  (tolerant statement parser), `identity.py` (Tier 4 policy and identity rules per analysis scope).
+- `web/`: FastAPI routes (`app.py`), pure tab view models (`views.py`), server-rendered templates and
+  static CSS; no frontend framework.
 - `cli.py`: `ogc web`, separate `ogc scheduler`, one-shot scan, retention and setup package commands.
 
 Tests use synthetic fixtures and block network access. Current capability/release status is in
@@ -123,11 +134,13 @@ Collectors return pydantic models; analyzers never call OCI.
 - **ScanRun** — id, start/end, tenancies attempted/succeeded/failed, per-collector status and errors.
 - **Finding** — the normalized unit every pillar emits:
   source-specific versioned identity (`docs/storage.md` §3.4),
-  `source` (`cloud_guard` | `security_zone` | `advisor` | `policy` | `audit_anomaly` | `coverage` |
-  `governance`),
+  `source` (`cloud_guard` | `security_zone` | `advisor` | `policy` | `identity` | `audit_anomaly` |
+  `coverage` | `governance`),
   `tenancy_ocid`, `region`, `compartment_ocid`, `resource_ocid`, `resource_type`,
   `severity` (`CRITICAL|HIGH|MEDIUM|LOW|INFO`), `title`, `description`, `rule_id`,
-  `first_seen`, `last_seen`, `resolved_at` (required addition), `status`, `raw_ref` (pointer to source record, not the raw blob), `cis_refs`.
+  `first_seen`, `last_seen`, `resolved_at` (required addition), `status`
+  (`open | resolved` from evaluation; `ignored | closed` from administrator triage, stored
+  separately and applied on read), `triage`, `raw_ref` (pointer to source record, not the raw blob), `cis_refs`.
 - **PolicyStatement** — parsed form of one IAM statement (see §7.3); alias definitions are policy-local.
 - **AuditEvent** — normalized audit record (event type, principal, source IP, user agent, compartment,
   resource, time, request action, response status).
@@ -228,6 +241,8 @@ instance/resource principals, interactive delegated-login grants or child API ke
 `ogc_scanner` receives tenancy-level local read permissions for the required datasets: Cloud Guard,
 Security Zones, Audit logs, Cloud Advisor, compartments, subscribed regions, users, groups and
 membership, IAM policies, identity domains, and organization/child discovery where applicable.
+The parent alone also needs `read usage-report` for organization cost (the Usage API returns the
+tenancies its billing covers); children never need it.
 Map the actual collector operations to current OCI resource types and least-privilege read grants
 before publishing the templates. The application-access groups are not scanner resource permissions.
 
@@ -236,6 +251,10 @@ new domains**, using tenancy-level read grants. Do not require separate users, t
 Terraform updates per target domain. Discover domains on subsequent scans and read their resources.
 Validate this behavior for users, groups and memberships with the actual SDK endpoints. Any denied
 or unsupported domain read is an explicit coverage gap, never proof of an empty domain.
+**Default scope (2026-10-27):** each tenancy reads users, groups, dynamic groups and API keys from
+its **default domain only**; reading every domain is a per-tenancy administrator opt-in on the Scan
+tab. The grants stay tenancy-level so opting in needs no setup change. Subjects in unread domains
+are unknown to analysis, never missing or unused.
 
 The parent and children each have their own local scanner permissions. Parent group membership
 alone grants no child access. **Endorse/Admit policies are not an OGC access mechanism.**
@@ -320,6 +339,10 @@ application for human login must not become an implicit dependency of scanner au
   automatically restore full coverage after successful reads. Clear warnings only on complete
   successful checks of the affected scope. One child's failure must not stop healthy siblings.
 - Retry temporary network/service failures with bounded backoff; show delayed/stale coverage.
+  Coverage errors include the HTTP status, validated OCI error code, failed operation name, OCI's
+  short error message (control characters stripped, tokens/keys redacted, at most 300
+  characters; 2026-10-27) and `opc-request-id` for Oracle support. No other response body content
+  is kept.
   A temporary failed request is not confirmation that a key has been revoked.
 - A **confirmed invalid/revoked parent API key stops organization-wide collection**, including new
   child exchanges; discard cached child tokens as agreed. Preserve historical data. Require an
@@ -360,7 +383,10 @@ Provide a Scan tab with an administrator-only on-demand full organization scan a
 recurring schedule. Support exactly **daily** (time of day) and **weekly** (weekday and time of
 day), with an explicit IANA timezone. Administrators may update or disable recurrence; viewers
 may inspect the schedule, next run and history. Recurrence is initially disabled. Full scans
-include parent and configured, unpaused children, every identity domain, governance and Audit.
+include parent and configured, unpaused children, governance and Audit, limited by each tenancy's
+collection settings (Cloud Guard, Cloud Advisor, identities from the default domain or all
+domains, policies, Audit; organization cost on the parent; `docs/scanning.md`). Disabled datasets are not read and are not
+coverage gaps; stored data for them is kept and labeled.
 
 Queue work durably for the separate scanner process; never run collection in the web request.
 Show queued/running/completed/partial/failed/interrupted history and worker offline status.
@@ -375,6 +401,26 @@ dataset, domain/region, timestamps and last success. Snapshot diagnostics when j
 label live coverage and unavailable older snapshots. Preserve historical failure evidence after
 recovery. Do not serve raw process logs, debug payloads or credentials through these views.
 See `docs/scanning.md` for timezone/DST, recovery, retention and authorization contracts.
+
+Tenancy collection leases last 600 s and are renewed every 60 s while a scan runs. Lease owners
+are tagged with the scanner worker's identity, so when a crashed or restarted worker's job is
+marked interrupted its tenancy leases are released and a queued scan starts within about two
+minutes. While a queued scan waits for earlier locks, the Scan tab says when it will start.
+
+Collection settings are per tenancy (`docs/scanning.md`); the default reads only the tenancy's
+default identity domain. `ogc_admin` may **ignore**, **mark closed** or **reopen** any finding,
+including coverage findings. Triage is stored apart from evaluated findings, applied on read
+(status `ignored`/`closed`), logged as a control event, cleared on parent replacement, and never
+writes to OCI. Ignored findings stay ignored across scans; closed findings reopen when a later
+complete evaluation still detects them. Finding lists show Open by default.
+
+Tabs: Overview, Coverage, Cloud Guard, Cloud Advisor, Cost (monthly cost for 12 months by
+tenancy, service and compartment tree with rolled-up totals; currencies never mixed), Resource organization (compartment tree
+with policy statements in each compartment and in its hierarchy, i.e. the compartment plus every
+compartment above it), Identity (users, groups, dynamic groups, policies, policy analysis),
+Activity (Audit events filterable by tenancy, region, principal, event and result), Scan and
+Configuration. Finding, Cloud Guard, Identity and data pages filter by tenancy and the relevant
+fields (severity, type, rule, status, dataset, domain, compartment).
 
 ---
 
@@ -517,7 +563,8 @@ ogc setup-package child /tmp/ogc-child.zip
 ```
 
 Enrollment and parent replacement are web workflows, not host bootstrap commands.
-The runtime currently exposes Tier 1 only; do not advertise designed higher tiers as implemented.
+The runtime exposes Tier 1 plus Tier 4 policy and identity analysis (admin-role grants excluded).
+Tiers 2, 3 (attribution) and 5 are not implemented; do not advertise them as implemented.
 
 ---
 
@@ -600,6 +647,38 @@ implementation status is in `docs/implementation/status.md`; checked items here 
       before the previous forward checkpoint, backfill runs toward a fixed target with a per-scan
       hour budget (`OGC_AUDIT_BACKFILL_HOURS`). `OGC_SETUP_PASSWORD` is at least 16 characters and
       only failed unlocks count toward the setup throttle (2026-10-22).
+- [x] Navigation: Overview, Coverage, Cloud Guard, Cloud Advisor, Resource organization (compartment
+      tree), Identity, Activity, Scan, Configuration. Findings/Inventory leave the menu; their routes
+      and exports remain (2026-10-22).
+- [x] Tier 4 policy/identity analysis enabled as persisted findings in four fail-closed scopes
+      (`analysis.policy`, `analysis.identity`, `analysis.api_keys`, `analysis.activity`). "Not in use"
+      combines static policy references with sign-in and Audit activity; activity rules run only when
+      Audit coverage spans `OGC_INACTIVE_DAYS`. OCI API keys do not expire, so age is flagged against
+      `OGC_API_KEY_MAX_AGE_DAYS` (2026-10-22).
+- [x] Per-tenancy collection settings on the Scan tab (Cloud Guard, Cloud Advisor, identities,
+      policies, Audit; identity domains default-only or all). Default reads only the default
+      identity domain. Subjects in unread domains are unknown: never stale or unused (2026-10-27).
+- [x] Resource organization shows policy statements per compartment and per hierarchy
+      (compartment plus every ancestor up to the tenancy); hidden, never zero, when policy
+      collection is incomplete or disabled (2026-10-27).
+- [x] Administrators can ignore, mark closed or reopen any finding. Ignore persists across scans;
+      closed reopens when a later complete evaluation detects it again. Triage is local state
+      only and never writes to OCI (2026-10-27, `docs/scanning.md`).
+- [x] Scan worker lease recovery: tenancy lease owners carry the worker identity; claiming work
+      after a dead worker releases that worker's leases; queued scans show when locks expire
+      (2026-10-23). Leases taken before this change can only expire (up to 10 minutes).
+- [x] Coverage messages include the validated OCI error code and request ID, never bodies
+      (2026-10-23). `ListApiKeys` is called without an attribute list after OCI rejected
+      `id,ocid,user,meta` with HTTP 400; key material and fingerprints are dropped.
+- [ ] Live gates: `ListApiKeys` under `read users` (the parent `ogc` key was still not shown on
+      2026-10-23), SCIM MFA/federation/sign-in attributes and `ListCategories` names, in a named
+      tenancy.
+- [x] Cost visibility: dataset `cost.monthly` from the parent's Usage API (`request_summarized_usages`,
+      MONTHLY, COST, 12 months, grouped by tenant, service, compartment ID and path); parent-only
+      grant `read usage-report`; Cost tab by tenancy, service and compartment (rolled up); a Cost
+      switch on the parent's collection settings, on by default (2026-10-27).
+- [ ] Cost live gates: the parent's Usage API returns child tenancies; `compartmentPath` format and
+      `compartment_depth=7`; paging; `read usage-report` alone is sufficient.
 - [ ] **Backlog — multi-organization support** (several parents in one deployment). To decide: user
       isolation (users see only the org whose identity domain they signed in to, plus an "operator"
       org that sees all), adding orgs (CLI + web for global admins — preferred), org-scoped settings,

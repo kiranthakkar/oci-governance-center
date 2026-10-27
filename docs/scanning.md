@@ -1,8 +1,9 @@
 # Scan controls and scheduling
 
 The Scan tab covers the enrolled parent organization. A full scan discovers children and
-collects IAM inventory across every identity domain, governance datasets and Audit activity
-from the parent and configured, unpaused children. Unconfigured and departed children are
+collects what each tenancy's collection settings enable (by default IAM inventory from the
+default identity domain, policies, governance datasets and Audit activity) from the parent and
+configured, unpaused children. Unconfigured and departed children are
 excluded. Existing dataset permissions, partial coverage and read-only OCI boundaries apply.
 
 `ogc_admin` can start an on-demand scan, save a recurring schedule and disable recurrence.
@@ -37,7 +38,11 @@ schedule is retained for recovery after credential repair.
 Workers claim jobs atomically across processes and renew their job lease while scanning. An
 expired job is marked Interrupted; operators can retry. Existing per-tenancy collection leases
 must expire or release before another full scan starts. Live scans renew these ten-minute leases
-every minute, so crash recovery waits at most ten minutes. Graceful shutdown drains active work while renewing its lease.
+every minute. Tenancy leases carry the scheduler's identity: when a stopped or restarted scheduler's
+job lease expires (two minutes), its job is marked Interrupted and its tenancy leases are released
+in the same step, so the next queued scan starts within about two minutes. Leases from other
+processes, such as a CLI `ogc scan`, still run to their own expiry. While a queued scan waits for
+leases, the Scan tab says so and shows when it will start at the latest. Graceful shutdown drains active work while renewing its lease.
 
 The tab shows the newest 50 requests with trigger, queued/running/completed/partial/failed/
 interrupted status, UTC request/start/finish times and a sanitized result. A run is Partial when
@@ -49,6 +54,71 @@ Schedules and requests are fenced by organization generation. Successful parent 
 clears the previous organization's schedule and jobs; incomplete onboarding leaves them intact.
 Repairing credentials for the same parent retains schedule and history, interrupts old active
 jobs and fences their workers. No scanner secrets are stored in schedule/job metadata.
+
+## Collection settings per tenancy (2026-10-27)
+
+The Scan tab's **What to collect** card holds one setting set per tenancy (parent and each
+configured child). `ogc_admin` changes them with CSRF protection and fresh membership
+verification; viewers see them read-only. Each change is recorded as a `scan_settings_changed`
+control event. A tenancy without saved settings uses the defaults below; successful parent
+replacement clears all settings.
+
+| Setting | Default | Datasets |
+|---|---|---|
+| Cloud Guard | on | `cloud_guard.*`, `security_zones.zones` |
+| Cloud Advisor | on | `optimizer.*` |
+| Identities | on | `identity_domains.users/groups/dynamic_groups/api_keys` |
+| Identity domains | **default domain only** | which domains identities are read from; "All identity domains" reads every active domain |
+| Policies | on | `identity.policies` |
+| Audit | on | `audit.*` and the activity analysis |
+| Cost (parent row only) | on | `cost.monthly`: organization cost from the parent's Usage API; needs `read usage-report` in the parent |
+
+Compartments, subscribed regions and the identity-domain list are always collected because
+scoping, Audit and default-domain detection depend on them. The default domain is the domain
+verified at enrollment or Configure (`type == DEFAULT` as a fallback).
+
+A disabled dataset is not read and publishes no coverage scope, so it is never an
+`OGC-ACCESS-002` gap and never makes a child Partial. Data and findings already stored for it are
+kept and not re-evaluated; tabs name the tenancies whose collection is disabled. Analysis scopes
+follow the settings: `analysis.policy` needs Policies; `analysis.identity`, `analysis.api_keys`
+and `analysis.activity` need Identities (activity also needs Audit). Policy analysis without
+identities, or with only the default domain read, treats subjects in unread domains as unknown:
+they are never reported stale or unused, and the Identity → Policies view lists them as "Not
+analyzed". The scanner's read grants are unchanged and remain tenancy-level, so enabling all
+domains needs no new setup.
+
+## Scanner trace (2026-10-27)
+
+The scanner process logs one line when each collection phase of a tenancy starts and one when it
+ends, for example `tenancy: ktdemos Cloud Guard scan started` and `tenancy: ktdemos Cloud Guard scan
+completed`. Phases are Compartment, IAM policy, Identity, Cloud Guard, Cloud Advisor, Cost Analysis
+(parent only) and Audit, as enabled in the tenancy's collection settings. A phase with gaps ends
+"completed with N incomplete scopes (see Coverage)", and each incomplete dataset is logged with its
+error; an aborted phase logs "scan failed". Lines contain no identifiers, records or tokens.
+
+Coverage and scan-detail errors for OCI service failures read, for example,
+`OCI read failed (HTTP 400 InvalidParameter) in request_summarized_usages. OCI says: <message>.
+Check local grants and service availability. Request ID: <id>.` OCI's message is sanitized and
+bounded (`collectors/inventory.py` `oci_message`).
+
+## Finding triage (2026-10-27)
+
+`ogc_admin` can act on any open finding, including coverage findings, from the Cloud Guard,
+Identity → Policy analysis and `/data/findings` tables:
+
+- **Ignore** — accepted or suppressed. The finding keeps its evaluation history but shows as
+  Ignored across later scans until an administrator reopens it. If OCI no longer reports it, it
+  shows Resolved; if it reappears, it is Ignored again.
+- **Mark closed** — the administrator states it is fixed. It shows as Closed until a later
+  complete evaluation still detects it, which reopens it automatically.
+- **Reopen** — removes the decision.
+
+Decisions (state, actor, time and an optional reason of at most 500 characters) are stored apart
+from evaluated findings in `finding_triage`, so rescans cannot drop them, and each is recorded as a
+control event. Every reader, including exports, sees the effective status
+(`open | resolved | ignored | closed`) and the decision. Finding lists show Open by default; the
+status filter shows Ignored, Closed, Resolved or all. Parent replacement clears triage, and
+retention removes decisions for purged findings. Triage never changes anything in OCI.
 
 ## Coverage findings and scanner diagnostics in the UI
 

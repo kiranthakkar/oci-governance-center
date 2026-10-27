@@ -90,7 +90,7 @@ def test_positive_and_negative_governance_rules(domain, dataset, positive, negat
 
 @pytest.mark.parametrize(
     "override",
-    [{"severity": "SEVERE"}, {"source": "unknown"}, {"status": "closed"}, {"extra": "field"}],
+    [{"severity": "SEVERE"}, {"source": "unknown"}, {"status": "dismissed"}, {"extra": "field"}],
 )
 def test_finding_contract_rejects_values_outside_agents_section_5(override):
     valid = {

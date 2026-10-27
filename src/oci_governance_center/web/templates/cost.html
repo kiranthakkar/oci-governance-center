@@ -1,0 +1,31 @@
+{% extends 'base.html' %}{% import '_filters.html' as f %}{% block content %}
+<p class="eyebrow">Cost</p><h1>Organization cost</h1>
+<p class="intro">Monthly cost for the parent and child tenancies, read from the parent tenancy's Usage API. Amounts are OCI's computed cost in the billing currency; the current month is month to date, and recent usage can take up to a day to appear.</p>
+{% if state == 'disabled' %}<aside class="warning"><strong>Cost collection is disabled</strong> for the parent tenancy in the Scan tab settings. {% if months %}Data shown is from the last time it was collected and is not refreshed.{% endif %}</aside>
+{% elif state == 'missing' %}<aside class="warning"><strong>Cost has not been collected yet.</strong> Run a scan. The parent's <code>ogc_scanner</code> group needs <code>Allow group ogc_scanner to read usage-report in tenancy</code>.</aside>
+{% elif state == 'incomplete' %}<aside class="warning"><strong>The latest cost read failed.</strong> {% if collected %}Data shown is from the last complete read ({{ collected | when }}).{% else %}No cost data has been read successfully yet, so totals are unknown, not zero.{% endif %} {{ error }} <a href="/data/coverage?status=failed&amp;dataset=cost.monthly">View coverage</a></aside>{% endif %}
+{% if children_missing %}<aside class="warning"><strong>Only one tenancy appears in the cost data.</strong> Child tenancy cost appears here only when the parent's billing covers the children.</aside>{% endif %}
+<nav class="subnav">{% for name, label in [('tenancy', 'By tenancy'), ('service', 'By service'), ('compartment', 'By compartment')] %}<a href="/cost?view={{ name }}{% if shared_query %}&amp;{{ shared_query }}{% endif %}"{% if view == name %} class="current"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+<form class="card filters" method="get" action="/cost"><input type="hidden" name="view" value="{{ view }}">
+<label>From month<select name="month_from">{% for m in months %}<option value="{{ m }}"{% if m == month_from %} selected{% endif %}>{{ m }}{% if m == current_month %} (to date){% endif %}</option>{% endfor %}</select></label>
+<label>To month<select name="month_to">{% for m in months %}<option value="{{ m }}"{% if m == month_to %} selected{% endif %}>{{ m }}{% if m == current_month %} (to date){% endif %}</option>{% endfor %}</select></label>
+{{ f.choice('tenancy', 'Tenancy' if view != 'compartment' else 'Tenancy (tree)', filters.tenancy, tenancies, 'Parent' if view == 'compartment' else 'All') }}
+{{ f.choice('service', 'Service', filters.service, services) }}
+{{ f.text('q', 'Compartment path contains', filters.q) }}
+<div class="actions"><button>Apply filters</button>{% if filtered %}<a class="button secondary" href="/cost?view={{ view }}">Clear filters</a>{% endif %}</div>
+</form>
+{% set known = state == 'complete' or months %}
+<div class="grid summary-grid">
+<section class="card summary"><h2>Total {{ month_from }}{% if month_to != month_from %} – {{ month_to }}{% endif %}</h2><p class="stat"><strong>{{ total | money if known else '—' }}</strong><span>{% if month_to == current_month %}includes month to date{% endif %}</span></p></section>
+<section class="card summary"><h2>Top services</h2>{% for s in top_services %}<p>{{ s.name }}<small>{{ s.amount | money }}</small></p>{% else %}<p class="muted">No cost in this range.</p>{% endfor %}</section>
+</div>
+<section class="card table-wrap"><h2>Monthly trend</h2><table><thead><tr><th>Month</th><th>Cost</th><th class="bar-col"></th></tr></thead><tbody>
+{% for t in trend %}<tr><td>{{ t.month }}{% if t.month == current_month %}<small>Month to date</small>{% endif %}</td><td>{{ t.amount | money }}</td><td class="bar-col"><meter min="0" max="100" value="{{ t.width }}" aria-label="Relative cost">{{ t.width }}%</meter></td></tr>{% else %}<tr><td colspan="3">No months collected.</td></tr>{% endfor %}
+</tbody></table></section>
+{% if view == 'compartment' %}<section class="card"><div class="title-row"><h2>{{ tree.name }}</h2><span class="badge">{{ tree.rolled | money }} total</span></div><p class="muted">Each compartment shows its own cost and, for compartments with sub-compartments, the total including them. Deleted compartments keep the cost they incurred.</p>{% if tree.own %}<p>Root compartment: {{ tree.own | money }}</p>{% endif %}
+{% if tree.children %}<ul class="tree">{% for node in tree.children recursive %}<li>{% if node.children %}<details open><summary>{{ node.name }} <span class="badge">{{ node.own | money }} in compartment</span> <span class="badge">{{ node.rolled | money }} with sub-compartments</span></summary>{% else %}<div class="leaf">{{ node.name }} <span class="badge">{{ node.own | money }}</span></div>{% endif %}{% if node.id %}<small>{{ node.id }}</small>{% endif %}{% if node.children %}<ul class="tree">{{ loop(node.children) }}</ul></details>{% endif %}</li>{% endfor %}</ul>
+{% else %}<p class="muted">No compartment cost in this range for this tenancy.</p>{% endif %}</section>
+{% else %}<section class="card table-wrap"><table><thead><tr><th>{{ 'Tenancy' if view == 'tenancy' else 'Service' }}</th><th>Cost</th><th>Share</th></tr></thead><tbody>
+{% for r in rows %}<tr><td>{% if view == 'tenancy' and r.tenant_id %}<a href="/cost?view=service&amp;tenancy={{ r.tenant_id | urlencode }}&amp;month_from={{ month_from }}&amp;month_to={{ month_to }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td><td>{{ r.amount | money }}</td><td>{% for currency, share in r.share.items() %}{{ '%.1f' | format(share) }}%{% if not loop.last %} · {% endif %}{% endfor %}</td></tr>
+{% else %}<tr><td colspan="3">No cost matches these filters.</td></tr>{% endfor %}
+</tbody></table></section>{% endif %}{% endblock %}
