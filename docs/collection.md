@@ -92,7 +92,7 @@ higher tier today collects Tier 1 only.
 | `optimizer.enrollment` | `OptimizerClient.list_enrollment_statuses` | home | enrollment status OCID | status, status reason | snapshot |
 | `optimizer.categories` | `OptimizerClient.list_categories(compartment_id_in_subtree=True)` | home | category OCID | id, name, description, lifecycle state | snapshot (own scope, so a failure does not block recommendations) |
 | `optimizer.recommendations` | `OptimizerClient.list_recommendations(compartment_id_in_subtree=True)` | home | recommendation OCID | id, category, name, description, importance, status, estimated cost saving, resource counts (status → count), time created/updated | snapshot |
-| `audit.events` | `LogSearchClient.search_logs` on `search "<tenancy OCID>/_Audit_Include_Subcompartment"`; fallback `AuditClient.list_events` per compartment | **every subscribed region** | OCI event ID | normalized `AuditEvent` (AGENTS.md §5) | stream, checkpoint per (generation, tenancy, region) |
+| `audit.events` | `AuditClient.list_events` per accessible compartment (no Logging Search collector) | **every subscribed region** | OCI event ID | normalized `AuditEvent` (AGENTS.md §5) | stream, checkpoint per (generation, tenancy, region) |
 
 `cost.monthly` (2026-10-27) is read once per scan from the **parent** with
 `UsageapiClient.request_summarized_usages` (MONTHLY, COST, current month plus 11 previous, grouped by

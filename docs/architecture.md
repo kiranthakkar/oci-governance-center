@@ -1,6 +1,6 @@
 # OCI Governance Center — Architecture
 
-Status: 2026-10-22, describing the new `oci_governance_center` implementation. Contracts are in
+Status: 2026-10-27, describing the new `oci_governance_center` implementation. Contracts are in
 [AGENTS.md sections 6–7](../AGENTS.md#6-oci-integration--enrollment-application-access-and-scanner-trust);
 capabilities and live release gates are in [implementation status](implementation/status.md).
 [Collection](collection.md), [storage](storage.md), [control plane](control-plane.md) and
@@ -27,7 +27,7 @@ flowchart LR
     Clients --> OCI[Read-only OCI APIs]
     Collectors --> Store[storage.py: scoped, fenced publication]
     Store --> SQLite[ogc.db and per-generation monthly Audit DBs]
-    Store --> Analysis[analyzers.py: governance rules]
+    Store --> Analysis[analyzers/: governance and identity rules]
     Analysis --> Store
     SQLite --> Web
 ```
@@ -44,18 +44,21 @@ Human login is OAuth Code + PKCE against the parent default domain. Group member
 Asserter, and only the parent's `ogc_admin` and `ogc_viewer` group IDs grant access. Membership is
 rechecked at least every five minutes and before every configuration change. The scanner is
 independent of login: the parent uses its API key directly, and children use API key → parent JWT →
-child UPST (AGENTS.md §6.6). Admin routes require `ogc_admin`. Viewers can read dashboards,
+child UPST, authenticated by the child confidential client ID/secret (AGENTS.md §6.6).
+Admin routes require `ogc_admin`. Viewers can read dashboards,
 coverage, findings, activity and exports. All checks are enforced server-side.
 
 Every collected dataset is published under an explicit `Scope` (tenancy, dataset, region, domain,
 compartment). A failed scope raises `OGC-ACCESS-002` and keeps the previous snapshot. Unknown is
 never rendered as healthy or empty. Tier 1 shows observed IAM policy statements and group
-membership; identity-domain admin-role grants arrive at Tier 4. OGC makes no complete
-effective-permissions claim.
+membership. Tier 4 policy/identity analysis is implemented; identity-domain admin-role grants
+remain unimplemented. OGC makes no complete effective-permissions claim.
 
 ## 3. Read-only enforcement contract
 
-- Only reviewed `get_*`, `list_*`, `summarize_*` and `search_*` SDK operations are permitted.
+- Only explicitly reviewed SDK operations are permitted. Most are `get_*`, `list_*`,
+  `summarize_*` or `search_*`. `UsageapiClient.request_summarized_usages` is a reviewed read-only
+  POST query exception, used only for parent organization cost.
 - SDK construction happens only in `oci_clients/__init__.py`. The OCI request signer and
   `SecurityTokenSigner` are constructed only in `auth/scanner.py`.
 - Every client is wrapped in `ReadOnlyClient`, which exposes only its kind's operations from
@@ -89,7 +92,27 @@ evidence. Live gates are listed in [implementation status](implementation/status
 | Tier 4 policy analysis | Policy-local aliases, parser, risky-grant rules | Implemented (mocked tests): tolerant parser (`analyzers/policy.py`) and POL-*/IAM-* rules (`analyzers/identity.py`) persisted as findings in four fail-closed scopes (`analysis.policy`, `.identity`, `.api_keys`, `.activity`); an incomplete input publishes the scope as incomplete and resolves nothing. Alias definitions are recorded (POL-XTEN-001) but aliases are not yet substituted. Admin-role grants are not collected. |
 | Tier 5 anomalies | collection §7 | Not implemented; Audit events are stored for later use. |
 
-## 5. Document ownership
+## 5. Current operational state
+
+Per-tenancy scan settings default identities to the Default domain, with opt-in all-domain reads.
+The parent alone collects cost using `read usage-report`. Finding triage is stored separately
+from evaluated findings; admin decisions are applied consistently to views and exports. Scan
+completion atomically captures scope diagnostics alongside the owned job update; no raw debug
+log files or bearer tokens are served through the UI. Job leases and owned tenancy leases support
+crash recovery and explicit scheduler cancellation.
+
+Resource organization counts require complete compartment discovery and policy coverage for every
+active compartment plus the tenancy root. Missing reads remain unknown. Orphan ancestor chains
+suppress hierarchy counts. Cost totals group by tenancy OCID, not display name; compartment cost
+queries use depth 6, with deeper usage aggregated by the API.
+
+The [operator guide](operations.md) describes the actual SQLite tables, encrypted payload boundaries,
+retention and recovery limitations. [Scan controls](scanning.md) owns detailed scheduling, coverage
+snapshots, cancellation and triage behavior. Historical storage/backup designs are not implemented
+commands. Human login requests only `urn:opc:idm:__myscopes__`, validates a user access token and
+uses Asserter; there is no ID-token requirement or human Me lookup.
+
+## 6. Document ownership
 
 - [IAM catalog](iam/README.md) owns permission intent. Rendering lives only in
   `provisioning/bundle.py`; do not add a second renderer.

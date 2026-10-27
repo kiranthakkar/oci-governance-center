@@ -42,7 +42,8 @@ every minute. Tenancy leases carry the scheduler's identity: when a stopped or r
 job lease expires (two minutes), its job is marked Interrupted and its tenancy leases are released
 in the same step, so the next queued scan starts within about two minutes. Leases from other
 processes, such as a CLI `ogc scan`, still run to their own expiry. While a queued scan waits for
-leases, the Scan tab says so and shows when it will start at the latest. Graceful shutdown drains active work while renewing its lease.
+leases, the Scan tab says so and shows when it will start at the latest. Graceful shutdown
+requests cancellation at safe points while the worker maintains its active job lease.
 
 The tab shows the newest 50 requests with trigger, queued/running/completed/partial/failed/
 interrupted status, UTC request/start/finish times and a sanitized result. A run is Partial when
@@ -150,3 +151,21 @@ explicitly labeled live organization coverage. Older jobs and interrupted jobs w
 link to current Coverage without presenting it as historical results. Snapshot retention follows
 scan history, and successful parent replacement clears both. The UI does not expose terminal logs,
 raw troubleshooting payloads, bearer tokens, client secrets or tracebacks.
+
+## Interpreting historical Audit coverage
+
+An `audit.backfill` message saying **“Audit history is still being collected through <timestamp>”**
+records successful progress up to a durable cursor. Subsequent scans continue toward the fixed
+point where forward reads began, with a default budget of 168 hours per region per scan
+(`OGC_AUDIT_BACKFILL_HOURS`). `audit.events` collects current activity separately, and
+`audit.reconcile` re-reads the previous checkpoint's 24-hour window for late deliveries.
+Targets are five minutes behind the current clock.
+
+Backfill progress currently uses the same incomplete status and OGC-ACCESS-002 finding as actual
+API failures. The UI has no separate Backfill-in-progress state. Read the dataset and error text
+before treating a Partial scan as a permissions failure; an actual failed API read carries a safe
+error diagnostic. A finished scan can retain unresolved gaps from previous attempts. Ignoring or
+closing a finding does not change the underlying Coverage status or authorize collection.
+
+See the [operator guide](operations.md) for the complete settings table, queue/authentication
+troubleshooting, storage boundaries and startup/recovery instructions.
