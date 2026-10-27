@@ -140,7 +140,7 @@ def test_audit_collects_recent_events_before_historical_backfill(service, parent
     )
     calls = []
 
-    def read(signer, domain, region, compartments, start, end):
+    def read(signer, domain, region, compartments, start, end, check_stop=None):
         calls.append((start, end))
         return []
 

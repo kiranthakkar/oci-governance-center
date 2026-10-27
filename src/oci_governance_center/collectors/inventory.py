@@ -273,9 +273,13 @@ class Trace:
             logger.info("tenancy: %s %s scan %s", self.tenancy, self.current, outcome)
         self.current = ""
 
-    def fail(self) -> None:
+    def progress(self, detail: str) -> None:
+        """Report progress inside a long phase (for example hourly Audit history)."""
+        logger.info("tenancy: %s %s scan: %s", self.tenancy, self.current, detail)
+
+    def fail(self, outcome: str = "failed") -> None:
         if self.current:
-            logger.warning("tenancy: %s %s scan failed", self.tenancy, self.current)
+            logger.warning("tenancy: %s %s scan %s", self.tenancy, self.current, outcome)
         self.current = ""
 
 

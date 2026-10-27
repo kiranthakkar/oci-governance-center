@@ -6,8 +6,12 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
+from oci_governance_center.collectors.inventory import Trace
 from oci_governance_center.diagnostics import PublicFailure
-from oci_governance_center.models import ChildCredentials, Identity, Scope, now
+from oci_governance_center.models import Batch, ChildCredentials, Identity, Scope, now
+from oci_governance_center.service import Cancelled
 from tests.conftest import install
 from tests.unit.test_web import browser, logged_in
 
@@ -218,3 +222,124 @@ def test_child_resume_verification_failure_is_a_safe_400(
     )
     response = client.post(f"/children/{child.ocid}/resume", data={"csrf": "synthetic-csrf"})
     assert response.status_code == 400 and "Trust was removed." in response.text
+
+
+def test_audit_stops_between_hours_and_keeps_committed_progress(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    commits = audit_sources(service, monkeypatch)
+    reads = []
+
+    def read(*_):
+        reads.append(1)
+        if len(reads) == 3:
+            service.stopping.set()
+        return []
+
+    monkeypatch.setattr("oci_governance_center.service.read_interval", read)
+    with pytest.raises(Cancelled):  # scan_one catches it and logs the stopped phase
+        service.audit(generation, object(), parent.domain, None)
+    # The stop is honored before the fourth hour; the three read hours stay committed.
+    assert len(reads) == 3 and len(commits) == 3
+    assert not service.store.has_coverage(audit_scope(parent, "audit.backfill"))
+
+
+def test_long_audit_ranges_report_progress(service, parent, monkeypatch, caplog):
+    generation = install(service.store, parent)
+    audit_sources(service, monkeypatch)
+    caplog.set_level("INFO")
+    trace = Trace("ktdemos")
+    trace.current = "Audit"
+    start = datetime(2026, 1, 1, tzinfo=now().tzinfo)
+    reached = service.audit_range(
+        generation,
+        object(),
+        parent.domain,
+        [],
+        audit_scope(parent, "audit.backfill"),
+        start,
+        start + timedelta(days=5),
+        48,
+        None,
+        None,
+        trace,
+    )
+    assert reached == start + timedelta(hours=48)
+    progress = [r.getMessage() for r in caplog.records if "collected through" in r.getMessage()]
+    assert progress == [
+        "tenancy: ktdemos Audit scan: audit.backfill us-ashburn-1 collected through "
+        "2026-01-02 00:00 UTC (24 of 48 hours this scan)",
+        "tenancy: ktdemos Audit scan: audit.backfill us-ashburn-1 collected through "
+        "2026-01-03 00:00 UTC (48 of 48 hours this scan)",
+    ]
+
+
+def test_stopped_collection_is_not_reported_as_a_failure(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    monkeypatch.setattr(service, "confirm_key", lambda *_: True)
+    monkeypatch.setattr("oci_governance_center.service.api_signer", lambda *_: object())
+    monkeypatch.setattr("oci_governance_center.service.bind_identity", lambda *_: None)
+    scope = Scope(tenancy=parent.domain.tenancy_ocid, dataset="identity.regions", region="r")
+
+    def batches(*_):
+        service.stopping.set()
+        yield Batch(scope=scope)
+        raise AssertionError("collection continued after the stop request")
+
+    monkeypatch.setattr("oci_governance_center.service.inventory", batches)
+    service.scan_one(generation, parent, None, "all")
+    statuses = {
+        json.loads(r["scope"])["dataset"]: r["status"] for r in service.store.rows("coverage")
+    }
+    assert "all.runner" not in statuses and statuses["identity.regions"] == "complete"
+    with service.store.db() as db:
+        assert db.execute("SELECT COUNT(*) FROM leases").fetchone()[0] == 0  # lock released
+
+
+def test_stop_still_runs_analysis_so_findings_match_inventory(service, parent, monkeypatch):
+    generation = install(service.store, parent)
+    monkeypatch.setattr(service, "confirm_key", lambda *_: True)
+    monkeypatch.setattr("oci_governance_center.service.api_signer", lambda *_: object())
+    monkeypatch.setattr("oci_governance_center.service.bind_identity", lambda *_: None)
+    tenancy = parent.domain.tenancy_ocid
+
+    def batches(*_):
+        yield Batch(scope=Scope(tenancy=tenancy, dataset="identity.compartments", region="r"))
+        service.stopping.set()
+        yield Batch(scope=Scope(tenancy=tenancy, dataset="identity.domains", region="r"))
+        raise AssertionError("collection continued after the stop request")
+
+    monkeypatch.setattr("oci_governance_center.service.inventory", batches)
+    service.scan_one(generation, parent, None, "all")
+    statuses = {
+        json.loads(r["scope"])["dataset"]: (r["status"], r["error"])
+        for r in service.store.rows("coverage")
+    }
+    # Policies were never read, so policy analysis fails closed instead of keeping old findings.
+    assert statuses["analysis.policy"][0] == "failed"
+    assert "identity.policies" in statuses["analysis.policy"][1]
+    assert service.cancelled.is_set()
+
+
+def test_audit_interval_stops_between_compartments(domain, monkeypatch):
+    from oci_governance_center.collectors import audit as module
+
+    read = []
+    monkeypatch.setattr(module, "client", lambda *_: NS(list_events="events"))
+    monkeypatch.setattr(module, "all_items", lambda *a: read.append(a[1]) or [])
+
+    def check_stop():
+        if len(read) == 2:  # stop requested while compartment "b" was being read
+            raise Cancelled("stop")
+
+    start = datetime(2026, 1, 1, tzinfo=now().tzinfo)
+    with pytest.raises(Cancelled):
+        module.read_interval(
+            object(),
+            domain,
+            "r",
+            ["a", "b", "c", "d"],
+            start,
+            start + timedelta(hours=1),
+            check_stop,
+        )
+    assert read == ["a", "b"]

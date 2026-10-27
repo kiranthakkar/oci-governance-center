@@ -66,6 +66,9 @@ class ScanSchedule(Model):
         raise ValueError("No schedule occurrence found")
 
 
+STOPPED = "Scanner was stopped by the operator; run the scan again."
+
+
 class ScanControl:
     """Persist scan controls behind the same organization fencing as all application state."""
 
@@ -237,6 +240,22 @@ class ScanControl:
                 ),
             )
             return dict(db.execute("SELECT * FROM scan_jobs WHERE id=?", (row["id"],)).fetchone())
+
+    def abandon(self, owner: str) -> None:
+        """Interrupt an exiting worker's running job and release its tenancy leases at once."""
+        with self.store.db() as db:
+            db.execute(
+                "UPDATE scan_jobs SET status='interrupted',finished_at=?,error=? "
+                "WHERE owner=? AND status='running'",
+                (
+                    now().isoformat(),
+                    "Scanner was stopped by the operator; run the scan again.",
+                    owner,
+                ),
+            )
+            db.execute(
+                "DELETE FROM leases WHERE substr(owner,1,?)=?", (len(owner) + 1, owner + ":")
+            )
 
     def locked_until(self, instant: datetime | None = None) -> datetime | None:
         """Latest expiry among live tenancy leases that keep queued scans waiting."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
 import threading
 from collections import defaultdict
@@ -87,6 +88,10 @@ REQUIRED_PRESENT = {
 }
 
 
+class Cancelled(RuntimeError):
+    """The operator asked the scanner to stop; work ends at the next safe point."""
+
+
 class Service:
     """Read-only tenancy operations; only local application state is modified."""
 
@@ -94,6 +99,10 @@ class Service:
         self.settings, self.store = settings, store
         # Set by the scan worker so its tenancy leases can be released if it dies mid-scan.
         self.worker = ""
+        # Set by the scheduler on SIGINT/SIGTERM; checked between OCI reads and Audit hours.
+        self.stopping = threading.Event()
+        # Set when a tenancy's collection actually ended early because of a stop request.
+        self.cancelled = threading.Event()
 
     def candidate(self, owner: str, parent: Parent, expected_generation: int | None = None) -> str:
         """Verify candidate credentials; activation also requires human admin OIDC."""
@@ -315,10 +324,15 @@ class Service:
                 self.store.block(generation, True)
             raise
 
+    def check_stop(self) -> None:
+        """Raise Cancelled once a stop was requested; called only between committed steps."""
+        if self.stopping.is_set():
+            raise Cancelled("Scanner stop requested")
+
     def scan_one(self, generation: int, parent: Parent, child: Child | None, family: str) -> None:
         """Collect a tenancy with its own signer and scoped publication."""
         domain = child.domain if child else parent.domain
-        if domain is None:
+        if domain is None or self.stopping.is_set():
             return
         scope = Scope(
             tenancy=domain.tenancy_ocid, dataset="authentication", region=domain.home_region
@@ -347,6 +361,7 @@ class Service:
                 else:
                     signer = api_signer(parent)
                     bind_identity(signer, parent.domain, parent.user_ocid)
+                self.check_stop()
                 self.store.publish(generation, Batch(scope=scope), revision, lease)
                 authenticated = True
                 failed = False
@@ -355,12 +370,13 @@ class Service:
                     # Audit disabled in the scan settings is not collected and is no coverage gap.
                     if settings.audit:
                         trace.start("Audit")
-                        self.audit(generation, signer, domain, revision, lease)
+                        self.audit(generation, signer, domain, revision, lease, trace)
                         if settings.identities:
                             self.activity_analysis(generation, domain, revision, lease)
                         trace.finish()
                 else:
                     identity: list[Batch] = []
+                    stopped = False
                     for batch in inventory(signer, domain, family, settings, trace):
                         trace.seen(batch)
                         self.store.publish(generation, batch, revision, lease)
@@ -369,13 +385,22 @@ class Service:
                         failed |= not batch.complete
                         if batch.scope.dataset.startswith(("identity.", "identity_domains.")):
                             identity.append(batch)
+                        # Publish what was read, then honor a stop before the next read.
+                        if self.stopping.is_set():
+                            stopped = True
+                            break
+                    # Analysis needs no OCI calls. After a stop it still runs and fails closed on
+                    # inputs this run did not read, so findings never pair with older inventory.
                     if family in {"all", "identity"}:
                         self.identity_analysis(
                             generation, domain, identity, revision, lease, settings
                         )
-                    # Organization cost is read once, from the parent; it covers the children.
+                    if stopped:
+                        raise Cancelled("Scanner stop requested")
                     trace.finish()
+                    # Organization cost is read once, from the parent; it covers the children.
                     if child is None and family in {"all", "governance"} and settings.cost:
+                        self.check_stop()
                         trace.start("Cost Analysis")
                         cost = trace.seen(costs(signer, domain, now()))
                         self.store.publish(generation, cost, revision, lease)
@@ -386,6 +411,10 @@ class Service:
                     self.child_status(
                         generation, child, "partial" if failed else "active", "", lease
                     )
+        except Cancelled:
+            self.cancelled.set()
+            trace.fail("stopped")
+            logger.info("Collection of %s stopped on operator request", trace.tenancy)
         except StaleWork as error:
             trace.fail()
             # Expected after pause, reconfiguration, replacement or lease loss; never silent.
@@ -471,7 +500,7 @@ class Service:
         generation, parent, blocked = self.store.state()
         if expected_generation is not None and generation != expected_generation:
             raise StaleWork("Organization changed before collection")
-        if parent is None or blocked:
+        if parent is None or blocked or self.stopping.is_set():
             return
         if family in {"all", "identity"}:
             self.discover(expected_generation=generation)
@@ -494,6 +523,7 @@ class Service:
         domain: Domain,
         revision: int | None,
         lease: tuple[str, str] | None = None,
+        trace: Trace | None = None,
     ) -> None:
         """Collect bounded Audit intervals; commit events before checkpoints."""
         identity = client("identity", signer, domain.home_region)
@@ -567,6 +597,7 @@ class Service:
                         budget,
                         revision,
                         lease,
+                        trace,
                     )
                     complete = reached >= target
                     message = (
@@ -580,7 +611,7 @@ class Service:
                         revision,
                         lease,
                     )
-                except StaleWork:
+                except (StaleWork, Cancelled):
                     raise
                 except Exception as error:
                     self.store.publish(
@@ -602,12 +633,22 @@ class Service:
         budget: int | None,
         revision: int | None,
         lease: tuple[str, str] | None,
+        trace: Trace | None = None,
     ) -> datetime:
-        """Read hourly Audit intervals toward target, committing each before moving on."""
+        """Read hourly Audit intervals toward target, committing each before moving on.
+
+        A stop request ends the range after the last committed hour; progress is kept.
+        """
         intervals = 0
+        planned = math.ceil((target - start) / timedelta(hours=1))
+        if budget is not None:
+            planned = min(planned, budget)
         while start < target and (budget is None or intervals < budget):
+            self.check_stop()
             interval_end = min(start + timedelta(hours=1), target)
-            events = read_interval(signer, domain, scope.region, compartments, start, interval_end)
+            events = read_interval(
+                signer, domain, scope.region, compartments, start, interval_end, self.check_stop
+            )
             self.store.audit_commit(
                 generation,
                 scope,
@@ -619,6 +660,11 @@ class Service:
             )
             start = interval_end
             intervals += 1
+            if trace and intervals % 24 == 0:
+                trace.progress(
+                    f"{scope.dataset} {scope.region} collected through {start:%Y-%m-%d %H:%M} UTC "
+                    f"({intervals} of {planned} hours this scan)"
+                )
         return start
 
     def findings(

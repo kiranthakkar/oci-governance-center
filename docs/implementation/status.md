@@ -202,3 +202,11 @@ in parent data, `compartmentPath` format/depth and paging.
 
 Additional live gates: `ListApiKeys` authorization under `read users` in every domain; the MFA,
 federation, service-user and last-sign-in SCIM attributes; and `ListCategories` names.
+
+## Review corrections: policy hierarchy and cost
+
+Counts now require all expected active-compartment policy scopes and complete compartment discovery;
+missing reads remain unknown. Hierarchy totals are unavailable for orphan subtrees while own counts
+can remain visible when collected. Cost queries use compartment depth 6, with deeper costs aggregated
+by OCI, and tenancy cost grouping uses OCIDs rather than display names. Regression cases cover all
+four corrections, including same-name parent/child tenancies with separate currency totals.

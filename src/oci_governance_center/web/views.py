@@ -262,15 +262,35 @@ def compartment_tree(
     finish(root)
     scopes = [json.loads(row["scope"]) | {"row": row} for row in coverage]
     policy_scopes = [
-        s["row"] for s in scopes if s["tenancy"] == tenancy and s["dataset"] == "identity.policies"
+        s for s in scopes if s["tenancy"] == tenancy and s["dataset"] == "identity.policies"
     ]
+    expected = {tenancy} | {
+        str(row["id"]) for row in rows if row.get("lifecycle_state") == "ACTIVE"
+    }
+    completed = {
+        str(s.get("compartment")) for s in policy_scopes if s["row"]["status"] == "complete"
+    }
+    incomplete_policies = {
+        str(s.get("compartment")) for s in policy_scopes if s["row"]["status"] != "complete"
+    }
+    compartment_status = next(
+        (
+            s["row"]
+            for s in scopes
+            if s["tenancy"] == tenancy and s["dataset"] == "identity.compartments"
+        ),
+        None,
+    )
     policy_state = (
         "disabled"
         if not policies_enabled
         else "missing"
         if not policy_scopes
         else "incomplete"
-        if any(row["status"] != "complete" for row in policy_scopes)
+        if not expected.issubset(completed)
+        or not expected.isdisjoint(incomplete_policies)
+        or compartment_status is None
+        or compartment_status["status"] != "complete"
         else "complete"
     )
     own: dict[str, int] = defaultdict(int)
@@ -279,12 +299,13 @@ def compartment_tree(
         if policy["scope"]["tenancy"] == tenancy and data.get("lifecycle_state") != "DELETED":
             own[str(data.get("compartment_id") or tenancy)] += len(data.get("statements") or [])
 
-    def count(node: Row, above: int) -> None:
-        known = policy_state == "complete"
+    def count(node: Row, above: int, ancestors_known: bool = True) -> None:
+        known = policy_state == "complete" and str(node["id"]) in completed
+        chain_known = ancestors_known and not node["orphan"]
         node["own"] = own[str(node["id"])] if known else None
-        node["hierarchy"] = above + own[str(node["id"])] if known else None
+        node["hierarchy"] = above + own[str(node["id"])] if known and chain_known else None
         for child in node["children"]:
-            count(child, above + own[str(node["id"])])
+            count(child, above + own[str(node["id"])], chain_known and known)
 
     count(root, 0)
     status = next(
@@ -660,8 +681,11 @@ def cost(
         "rows": [],
     }
     if view == "tenancy":
-        ids = {tenant(r): str(r.get("tenant_id") or "") for r in selected}
-        result["rows"] = [g | {"tenant_id": ids.get(g["name"], "")} for g in grouped(tenant)]
+        names = {str(r.get("tenant_id") or ""): tenant(r) for r in selected}
+        result["rows"] = [
+            g | {"tenant_id": g["name"], "name": names[g["name"]]}
+            for g in grouped(lambda r: str(r.get("tenant_id") or ""))
+        ]
     elif view == "service":
         result["rows"] = by_service
     else:
@@ -675,7 +699,7 @@ def cost_tree(rows: list[Row], tenancy: str, labels: dict[str, str]) -> Row:
     Each node has its own cost and a rolled-up total including every sub-compartment.
     Compartment names cannot contain "/", so paths split unambiguously.
     """
-    root: Row = {"name": labels.get(tenancy, tenancy), "own": {}, "children": {}, "id": tenancy}
+    root: Row = {"name": labels.get(tenancy, tenancy), "own": {}, "children": {}, "ids": set()}
     for row in rows:
         if row.get("tenant_id") != tenancy:
             continue
@@ -684,10 +708,11 @@ def cost_tree(rows: list[Row], tenancy: str, labels: dict[str, str]) -> Row:
         # The first path element is the tenancy's root compartment.
         for name in parts[1:]:
             node = node["children"].setdefault(
-                name, {"name": name, "own": {}, "children": {}, "id": ""}
+                name, {"name": name, "own": {}, "children": {}, "ids": set()}
             )
-        if parts[1:]:
-            node["id"] = node["id"] or str(row.get("compartment_id") or "")
+        if row.get("compartment_id"):
+            # One path can name a deleted and a current compartment; both OCIDs are listed.
+            node["ids"].add(str(row["compartment_id"]))
         add(node["own"], str(row.get("currency") or ""), float(row.get("amount") or 0))
 
     def finish(node: Row) -> Money:
@@ -698,6 +723,7 @@ def cost_tree(rows: list[Row], tenancy: str, labels: dict[str, str]) -> Row:
                 add(rolled, currency, amount)
         node["children"] = children
         node["rolled"] = rolled
+        node["ids"] = sorted(node["ids"])
         return rolled
 
     finish(root)

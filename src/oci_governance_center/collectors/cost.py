@@ -14,9 +14,12 @@ from ..oci_clients import all_items, client
 from .inventory import attempt
 
 MONTHS = 12
-GROUP_BY = ["tenantId", "tenantName", "service", "compartmentId", "compartmentPath"]
-# OCI allows six compartment levels below the root; the path then names every level.
-COMPARTMENT_DEPTH = 7
+# The Usage API accepts at most four groupBy keys ("Number of groupBy key is over 4", live
+# 2026-10-27). Compartment OCIDs keep deleted and recreated or renamed compartments apart;
+# tenancy names come from OGC's own tenancy list instead of a fifth key.
+GROUP_BY = ["tenantId", "service", "compartmentId", "compartmentPath"]
+# Usage API compartmentDepth accepts 1..6 (root is depth 1). Deeper costs roll into depth 6.
+COMPARTMENT_DEPTH = 6
 
 
 def month_start(year: int, month: int) -> datetime:
@@ -64,7 +67,7 @@ def read_costs(signer: Any, domain: Domain, today: datetime) -> list[Record]:
             "amount": float(item.computed_amount or 0),
             "currency": item.currency,
         }
-        dimensions = (item.tenant_id, item.service, item.compartment_id, item.compartment_path)
+        dimensions = (item.tenant_id, item.service, item.compartment_id)
         ident = json.dumps([month, *dimensions, item.currency])
         key = hashlib.sha256(ident.encode()).hexdigest()
         # Rows that share every kept dimension (for example split by an ungrouped one) merge.

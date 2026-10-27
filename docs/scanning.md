@@ -96,6 +96,18 @@ completed`. Phases are Compartment, IAM policy, Identity, Cloud Guard, Cloud Adv
 "completed with N incomplete scopes (see Coverage)", and each incomplete dataset is logged with its
 error; an aborted phase logs "scan failed". Lines contain no identifiers, records or tokens.
 
+Audit history logs progress every 24 collected hours, for example `tenancy: ktdemos Audit scan:
+audit.backfill us-sanjose-1 collected through 2026-08-16 08:56 UTC (24 of 168 hours this scan)`.
+Backfill reads every compartment for every hour, so it is the slowest phase.
+
+**Stopping the scanner** (`ogc scheduler`, with or without `--once`). The first Ctrl-C or SIGTERM
+asks the running scan to stop after its current OCI request; everything already read is kept and
+an Audit hour is committed only when complete. Policy and identity analysis still run and fail
+closed on inputs that were not read. The job is marked interrupted only if a tenancy actually
+ended early (a parent-key failure is still reported as a failure), and the next scan continues from
+the saved progress. A second Ctrl-C marks the job interrupted, releases this worker's tenancy
+locks and exits immediately.
+
 Coverage and scan-detail errors for OCI service failures read, for example,
 `OCI read failed (HTTP 400 InvalidParameter) in request_summarized_usages. OCI says: <message>.
 Check local grants and service availability. Request ID: <id>.` OCI's message is sanitized and

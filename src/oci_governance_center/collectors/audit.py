@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
@@ -30,14 +31,26 @@ def normalize(event: Any) -> dict[str, Any]:
 
 
 def read_interval(
-    signer: Any, domain: Domain, region: str, compartments: list[str], start: Any, end: Any
+    signer: Any,
+    domain: Domain,
+    region: str,
+    compartments: list[str],
+    start: Any,
+    end: Any,
+    check_stop: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """List all Audit events per compartment/region; requires read audit-events."""
+    """List all Audit events per compartment/region; requires read audit-events.
+
+    check_stop may raise between compartments; the interval is then not committed and is read
+    again by the next scan.
+    """
     if end - start > timedelta(hours=1):
         raise ValueError("Audit API intervals must be no longer than one hour")
     audit = client("audit", signer, region)
     events: dict[str, dict[str, Any]] = {}
     for compartment in compartments:
+        if check_stop:
+            check_stop()
         for event in all_items(audit.list_events, compartment, start, end):
             normalized = normalize(event)
             events[normalized["id"]] = normalized
