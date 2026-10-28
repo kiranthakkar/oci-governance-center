@@ -52,12 +52,21 @@ not the setup password, authorizes configuration and replacement after that poin
 
 `GET /healthcheck` is available without login before and after enrollment. It returns HTTP 200
 with the plain-text body `OK`. It checks the application's HTTP response path, not OCI access,
-scanner-worker liveness, or collection coverage. Use a Host header accepted by the configured
-public URL. The existing `/health` endpoint remains available with JSON `{"status":"ok"}`.
+scanner-worker liveness, or collection coverage. This exact GET path accepts the backend Host
+header used by a load balancer; application pages still require the configured public hostname.
+The existing `/health` endpoint remains available with JSON `{"status":"ok"}` and retains host
+validation. `/healthcheck/` is a different path and does not receive the exemption.
 
 ```bash
 curl -i http://127.0.0.1:8000/healthcheck
 ```
+
+For `OGC_PUBLIC_BASE_URL=https://ogc.ktdemos.com` with the backend at `10.0.0.220:8010`,
+configure the load balancer health probe with protocol **HTTP**, port **8010**, path
+**/healthcheck**, and expected status **200** (body `OK`). Its Host header may be the backend IP;
+no public-host override is needed for this probe. Keep normal traffic using `ogc.ktdemos.com`.
+TLS terminates at the load balancer; `ogc web` itself serves HTTP.
+
 
 ## Parent setup and human login
 
@@ -202,3 +211,38 @@ runner. Do not use historical `osc db` examples. Before operator-managed copies 
 stop both processes and preserve the entire data root, SQLite sidecar files if present, and the
 original encryption key separately. A database-only copy omits Audit history. Recovery/restore of
 such a copy has not been certified; rehearse recovery on an isolated copy before relying on it.
+
+## Web request and connection diagnostics
+
+Start the server with `ogc web` to enable the pinned Uvicorn h11 diagnostic protocol. Its startup
+log states the HTTP listener and configured public origin. A load balancer may use an HTTP health
+probe but HTTPS for normal backend traffic; set **both** to HTTP/1.1 when TLS terminates at the load
+balancer. With `https://ogc.ktdemos.com` public and `10.0.0.220:8010` backend, use HTTP on port 8010
+for backend forwarding and keep the public hostname on normal requests.
+
+Before an HTTP request reaches ASGI, malformed-connection logs identify the socket peer and a safe
+reason: TLS handshake on the plain HTTP listener, missing/duplicate Host headers, malformed request
+line/header, parser header-size limit, or recognized HTTP/2/PROXY framing on a rejected connection.
+The original generic Uvicorn warning may appear alongside the explanatory event. Parser diagnostics
+never print raw bytes or raw exception text. They cannot include an application request ID because
+no valid application request exists yet. If launched with a bare `uvicorn` command instead of
+`ogc web`, the custom protocol is not selected automatically.
+
+Requests that reach the application receive an `X-OGC-Request-ID` response header. The web tier logs
+a generated ID, socket peer, allow-listed method, matched route pattern, status and duration. Query
+strings, raw unmatched paths, cookies, Authorization headers, request bodies and redirect targets
+are omitted. Structured application log entries within the request also include the correlation ID.
+Host validation failures include the configured expected host; 403 summaries point to role/CSRF/origin
+checks. These hints narrow troubleshooting and do not override authorization or host validation.
+
+Unexpected exceptions produce a generic HTTP 500 response with a reference ID. Logs include the
+exception class and file/line/function locations, without exception messages, source snippets or
+local variables that might contain secrets. Handled verification failures retain their existing
+safe diagnostics. Raw Uvicorn access logging remains disabled; safe application request summaries
+are enabled instead.
+
+For a browser 502, correlate the time with the connection logs first. A TLS-on-HTTP reason identifies
+a backend protocol mismatch; fix the load balancer forwarding protocol, then retry. If a valid
+request reaches OGC, use `X-OGC-Request-ID` to find its status/error events. A 502 without a matching
+connection/request event also requires checking load balancer reachability, timeouts and backend
+selection; health-probe success alone does not prove normal forwarding works.

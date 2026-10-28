@@ -46,6 +46,7 @@ from ..scans import ScanControl, ScanSchedule
 from ..service import Service
 from ..storage import StaleWork, Store
 from . import views
+from .observability import RequestDiagnostics
 
 FINDING_STATUSES = {"open", "resolved", "ignored", "closed"}
 # Cost rows are large and only the Cost tab reads them.
@@ -91,6 +92,16 @@ class CsrfToken:
     __html__ = __str__
 
 
+class ApplicationHostMiddleware(TrustedHostMiddleware):
+    """Allow only the public liveness GET to use a load balancer's backend Host header."""
+
+    async def __call__(self, scope: ASGIScope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"] == "/healthcheck":
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 class BodyLimit:
     """Bound all request bodies, including chunked multipart uploads, before form parsing."""
 
@@ -130,7 +141,7 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
     scans = ScanControl(store)
     app.add_middleware(BodyLimit)
     app.add_middleware(
-        TrustedHostMiddleware, allowed_hosts=[str(urlsplit(settings.public_base_url).hostname)]
+        ApplicationHostMiddleware, allowed_hosts=[str(urlsplit(settings.public_base_url).hostname)]
     )
     directory = Path(__file__).parent
     templates = Jinja2Templates(directory=directory / "templates")
@@ -1297,4 +1308,7 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="ogc-{table}.json"'},
         )
 
+    app.add_middleware(
+        RequestDiagnostics, expected_host=str(urlsplit(settings.public_base_url).hostname)
+    )
     return app

@@ -3,7 +3,10 @@
 import json
 import logging
 import re
+from contextvars import ContextVar
 from datetime import UTC, datetime
+
+request_id_context: ContextVar[str] = ContextVar("ogc_web_request_id", default="")
 
 
 class Redaction(logging.Filter):
@@ -40,6 +43,7 @@ class Structured(logging.Formatter):
                 "level": record.levelname,
                 "logger": record.name,
                 "message": record.getMessage(),
+                **({"request_id": request_id_context.get()} if request_id_context.get() else {}),
             }
         )
 

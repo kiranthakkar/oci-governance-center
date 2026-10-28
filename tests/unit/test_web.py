@@ -329,3 +329,20 @@ def test_healthcheck_returns_plain_ok_without_login_before_and_after_enrollment(
         assert "set-cookie" not in response.headers
     with service.store.db() as db:
         assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_backend_healthcheck_allows_internal_host_without_relaxing_application_hosts(
+    settings, service
+):
+    configured = settings.model_copy(update={"public_base_url": "https://ogc.ktdemos.com"})
+    client = browser(configured, service)
+    headers = {"host": "10.0.0.220:8010"}
+    response = client.get("/healthcheck", headers=headers)
+    assert response.status_code == 200 and response.text == "OK"
+    assert "set-cookie" not in response.headers
+    for path in ("/", "/setup", "/configuration", "/health", "/healthcheck/", "/auth/login"):
+        response = client.get(path, headers=headers)
+        assert response.status_code == 400
+        assert response.text == "Invalid host header"
+    assert client.post("/healthcheck", headers=headers).status_code == 400
+    assert client.get("/healthcheck").status_code == 200

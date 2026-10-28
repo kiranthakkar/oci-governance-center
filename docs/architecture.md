@@ -112,7 +112,17 @@ snapshots, cancellation and triage behavior. Historical storage/backup designs a
 commands. Human login requests only `urn:opc:idm:__myscopes__`, validates a user access token and
 uses Asserter; there is no ID-token requirement or human Me lookup.
 
-## 6. Document ownership
+## 6. Web diagnostics boundary
+
+`web/observability.py` provides ASGI request summaries and a Uvicorn h11 protocol selected by
+`ogc web`. Parser errors before ASGI get safe categories and socket peer metadata; raw bytes and
+h11 error text are excluded. Application requests get generated correlation IDs, matched route
+patterns, status/duration, and bounded exception locations. Query/body/header secrets are not
+logged. The global redaction filter remains active. Unexpected failures expose only a generic
+500 reference, while authored verification diagnostics retain safe explanations. The custom h11
+integration depends on the pinned Uvicorn version and has protocol-level regression tests.
+
+## 7. Document ownership
 
 - [IAM catalog](iam/README.md) owns permission intent. Rendering lives only in
   `provisioning/bundle.py`; do not add a second renderer.

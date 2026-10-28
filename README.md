@@ -70,8 +70,9 @@ Development sessions use a separate HttpOnly, SameSite=Lax cookie without the Se
 For production, set `OGC_PUBLIC_BASE_URL` to your HTTPS origin, such as `https://ogc.example.com`,
 and put the web process behind an HTTPS reverse proxy that preserves the configured Host header.
 HTTPS sessions use Secure, HttpOnly, SameSite=Lax cookies with the `__Host-` prefix and HSTS.
-The backend binds to loopback by default. Request access logging is disabled so OIDC authorization
-codes do not enter access logs. OGC's public URL is configuration, not inferred from untrusted
+The backend binds to loopback by default. Raw Uvicorn access logging is disabled so OIDC
+authorization codes do not enter access logs. Safe application summaries include route patterns,
+status, duration and `X-OGC-Request-ID`, omitting queries, bodies and credentials. OGC's public URL is configuration, not inferred from untrusted
 forwarded headers. Hosting/deployment automation remains in the backlog.
 
 In a second process with the same settings and encryption key:
@@ -215,3 +216,8 @@ See [scanning and triage](docs/scanning.md) and [troubleshooting](docs/operation
 
 The former `OGC_DEBUG_TOKEN_EXCHANGE` setting has been removed. Current logs redact tokens;
 raw bearer tokens and request payloads are not exposed in the UI.
+
+
+For load-balancer failures, use the [web diagnostics guide](docs/operations.md#web-request-and-connection-diagnostics).
+`ogc web` reports safe parser rejection reasons, including HTTPS/TLS sent to its plain HTTP port.
+Use HTTP/1.1 for backend forwarding when HTTPS terminates at the load balancer.

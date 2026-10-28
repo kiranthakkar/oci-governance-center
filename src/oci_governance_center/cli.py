@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import threading
@@ -41,12 +42,21 @@ def encryption_key() -> None:
 def web(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Serve OGC over loopback HTTP for development or behind an HTTPS reverse proxy."""
     from .web.app import create_app
+    from .web.observability import DiagnosticHTTPProtocol
 
     settings, service = runtime()
+    logging.getLogger(__name__).info(
+        "Web listener: backend=http://%s:%s, public_origin=%s. "
+        "Use HTTP/1.1 to this backend; terminate HTTPS at the load balancer.",
+        host,
+        port,
+        settings.public_base_url,
+    )
     uvicorn.run(
         create_app(settings, service),
         host=host,
         port=port,
+        http=DiagnosticHTTPProtocol,
         proxy_headers=False,
         access_log=False,
         log_config=None,

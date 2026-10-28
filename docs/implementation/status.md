@@ -123,3 +123,13 @@ cleans managed old-organization artifacts but cannot recall files already downlo
 
 Direct dependency pins live in `pyproject.toml` and transitive resolutions in `uv.lock`. Existing
 Authlib/Starlette HTTP-client deprecation warnings are visible; they are not suppressed.
+
+## Web diagnostics (2026-10-27)
+
+The exact GET `/healthcheck` accepts internal backend Host headers; application routes retain the
+configured hostname requirement. `ogc web` selects a diagnostic h11 protocol that explains rejected
+TLS/HTTP/PROXY connections and safe parser failure categories without logging request bytes.
+Application request summaries and response headers carry generated request IDs. Structured logs
+within that request share the ID. Unexpected failures report exception class and bounded stack
+locations, not raw messages, source text or local variables. Queries, credentials, bodies and
+unmatched raw paths are omitted. This logging does not configure TLS or change the load balancer.
