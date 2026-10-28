@@ -9,10 +9,10 @@ import pytest
 from oci_governance_center.auth.oidc import endpoint
 from oci_governance_center.auth.scanner import (
     Exchange,
-    ScanAccessFailure,
     api_signer,
     bind_identity,
 )
+from oci_governance_center.diagnostics import PublicFailure
 from oci_governance_center.models import domain_origin
 from oci_governance_center.oci_clients import OPERATIONS, ReadOnlyClient, all_items
 
@@ -66,13 +66,16 @@ def test_binding_rejects_wrong_owning_tenancy(parent, monkeypatch):
         id=parent.user_ocid, compartment_id="ocid1.tenancy.oc1..aaaawrong", lifecycle_state="ACTIVE"
     )
     identity.get_domain.return_value.data = NS(
-        display_name="Default",
-        compartment_id=parent.domain.tenancy_ocid,
+        id=parent.domain.domain_ocid,
+        home_region=parent.domain.home_region,
+        display_name="NonDefault",
+        compartment_id="ocid1.compartment.oc1..foreign",
         url=parent.domain.url,
         lifecycle_state="ACTIVE",
     )
     monkeypatch.setattr("oci_governance_center.auth.scanner.client", lambda *_: identity)
-    with pytest.raises(ScanAccessFailure):
+    monkeypatch.setattr("oci_governance_center.auth.scanner.all_items", lambda *a, **k: [])
+    with pytest.raises(PublicFailure, match="different tenancy"):
         bind_identity(object(), parent.domain, parent.user_ocid)
 
 

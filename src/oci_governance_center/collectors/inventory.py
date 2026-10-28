@@ -219,7 +219,7 @@ def discover(signer: Any, domain: Domain) -> list[Child]:
             "cannot be verified from this response."
         )
     # Organization listings carry no child home region, and the parent's region must never stand
-    # in for it. It stays unknown until Configure verifies the child's default domain.
+    # in for it. It stays unknown until Configure verifies the child's selected domain.
     return [
         Child(ocid=m.tenancy_id, name=m.name or m.tenancy_id)
         for m in current
@@ -227,9 +227,9 @@ def discover(signer: Any, domain: Domain) -> list[Child]:
     ]
 
 
-def is_default(record: Record, domain: Domain) -> bool:
-    """Whether an identity.domains record is the tenancy's default domain."""
-    return record.key == domain.domain_ocid or str(record.data.get("type") or "") == "DEFAULT"
+def is_selected(record: Record, domain: Domain) -> bool:
+    """Whether the record is the selected scanner domain, regardless of domain type."""
+    return record.key == domain.domain_ocid
 
 
 class Trace:
@@ -384,21 +384,22 @@ def inventory(
             for record in domain_batch.records:
                 if record.data.get("lifecycle_state") != "ACTIVE":
                     continue
-                # Only the default domain is read unless all domains are enabled; skipped
+                # Only the selected scanner domain is read unless all domains are enabled; skipped
                 # domains are not collected, which analysis treats as unknown, never empty.
                 if not settings.identities or not (
-                    settings.all_domains or is_default(record, domain)
+                    settings.all_domains or is_selected(record, domain)
                 ):
                     continue
+                domain_region = str(record.data.get("home_region") or domain.identity_region)
                 try:
                     endpoint = domain_origin(str(record.data["url"]))
-                    domains = client("domains", signer, region, endpoint)
+                    domains = client("domains", signer, domain_region, endpoint)
                 except ValueError:
                     yield Batch(
                         scope=Scope(
                             tenancy=tenancy,
                             dataset="identity_domains.users",
-                            region=region,
+                            region=domain_region,
                             domain=record.key,
                         ),
                         complete=False,
@@ -409,7 +410,7 @@ def inventory(
                     Scope(
                         tenancy=tenancy,
                         dataset="identity_domains.users",
-                        region=region,
+                        region=domain_region,
                         domain=record.key,
                     ),
                     partial(read_users, domains),
@@ -442,7 +443,7 @@ def inventory(
                     Scope(
                         tenancy=tenancy,
                         dataset="identity_domains.groups",
-                        region=region,
+                        region=domain_region,
                         domain=record.key,
                     ),
                     read_groups,
@@ -451,7 +452,7 @@ def inventory(
                     Scope(
                         tenancy=tenancy,
                         dataset="identity_domains.dynamic_groups",
-                        region=region,
+                        region=domain_region,
                         domain=record.key,
                     ),
                     partial(
@@ -467,7 +468,7 @@ def inventory(
                     Scope(
                         tenancy=tenancy,
                         dataset="identity_domains.api_keys",
-                        region=region,
+                        region=domain_region,
                         domain=record.key,
                     ),
                     partial(read_api_keys, domains),

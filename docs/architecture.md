@@ -131,3 +131,13 @@ integration depends on the pinned Uvicorn version and has protocol-level regress
   `CREATE TABLE IF NOT EXISTS` is not a migration mechanism.
 - No live OCI test, CLI command or scan is authorized by this document. Sandbox evidence needs the
   user's explicit session authorization and a named tenancy/profile.
+
+## Selected-domain regional routing
+
+The scanner identity domain may be Default or secondary and may live outside the tenancy home
+region. `Domain.home_region` remains the tenancy service-routing region; `Domain.region` is the
+identity-domain region, verified/discovered from IAM domain metadata. Older records with no region
+fall back to home region for metadata bootstrap. Identity-domain user verification uses Users SCIM
+reads with domain/tenancy ownership checks, not legacy IAM GetUser. Parent login/group lookup uses
+the selected parent domain. Single-domain collection selects exactly its OCID; all-domain collection
+routes each domain API to that domain's home region. Generated policies bind scanner group OCIDs.

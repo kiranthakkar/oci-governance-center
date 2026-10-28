@@ -24,7 +24,7 @@ def sdk(domain, monkeypatch):
             compartment_id=domain.tenancy_ocid,
             display_name=name,
             url=f"https://idcs-{guid * 32}.identity.oraclecloud.com",
-            home_region="us-ashburn-1",
+            home_region="us-ashburn-1" if kind == "DEFAULT" else "uk-london-1",
             type=kind,
             lifecycle_state="ACTIVE",
         )
@@ -124,7 +124,7 @@ def test_admin_saves_settings_from_the_scan_tab(settings, service, parent, monke
     client = signed_in(settings, service, parent, monkeypatch, "ogc_admin")
     tenancy = parent.domain.tenancy_ocid
     page = client.get("/scans").text
-    assert "What to collect" in page and "Default domain only" in page and "<script" not in page
+    assert "What to collect" in page and "Scanner domain only" in page and "<script" not in page
     response = client.post(
         f"/scans/settings/{tenancy}",
         data={"csrf": "synthetic-csrf", "cloud_guard": "on", "policies": "on", "domains": "all"},
@@ -242,3 +242,39 @@ def test_scan_trace_reports_gaps_and_failures(caplog):
     )
     assert messages[-1] == "tenancy: child Cloud Advisor scan failed"
     assert "tenancy: child Cloud Guard scan: cloud_guard.problems incomplete: denied" in messages
+
+
+def test_selected_secondary_domain_only_does_not_also_collect_default(domain, sdk):
+    selected = domain.model_copy(
+        update={
+            "domain_ocid": APPS,
+            "guid": "b" * 32,
+            "url": "https://idcs-" + "b" * 32 + ".identity.oraclecloud.com",
+        }
+    )
+    collect(selected, ScanSettings())
+    assert sdk == [selected.url]
+
+
+def test_all_domain_collection_uses_each_domains_region(domain, sdk, monkeypatch):
+    from oci_governance_center.collectors import inventory as module
+
+    original = module.client
+    calls = []
+
+    def observe(kind, signer, region, endpoint=None):
+        calls.append((kind, region, endpoint))
+        return original(kind, signer, region, endpoint)
+
+    monkeypatch.setattr(module, "client", observe)
+    batches = list(inventory(object(), domain, "identity", ScanSettings(all_domains=True)))
+    assert (
+        "domains",
+        "uk-london-1",
+        "https://idcs-" + "b" * 32 + ".identity.oraclecloud.com",
+    ) in calls
+    assert all(
+        b.scope.region == "uk-london-1"
+        for b in batches
+        if b.scope.dataset.startswith("identity_domains.") and b.scope.domain == APPS
+    )

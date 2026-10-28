@@ -25,7 +25,10 @@ def test_bundles_parse_and_offer_equivalent_manual_read_policies(kind):
     assert "client_secret" not in config["output"]
     statements = config["resource"]["oci_identity_policy"]["scanner"]["statements"]
     assert all(" to read " in s and " in tenancy" in s for s in statements)
-    assert all(s in guide for s in statements)
+    assert all(
+        s.replace("${oci_identity_domains_group.scanner.ocid}", "<ogc_scanner group OCID>") in guide
+        for s in statements
+    )
     assert not any("Endorse" in s or "Admit" in s for s in statements)
 
 
@@ -75,7 +78,7 @@ def test_parent_has_login_roles_and_public_key_only():
     }
     assert groups["admin"]["members"][0]["value"] == "${var.initial_admin_id}"
     assert (
-        config["resource"]["oci_identity_api_key"]["scanner"]["key_value"]
+        config["resource"]["oci_identity_domains_api_key"]["scanner"]["key"]
         == "${var.scanner_public_key}"
     )
     assert "No child" in manual("child")

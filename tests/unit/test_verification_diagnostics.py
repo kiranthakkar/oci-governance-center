@@ -84,7 +84,7 @@ def test_parent_setup_page_shows_actual_local_key_failure(settings, service, par
     assert service.store.state()[1] is None
 
 
-def test_user_read_failure_reports_get_user_step(parent, monkeypatch):
+def test_user_read_failure_reports_domain_scim_step(parent, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -92,11 +92,22 @@ def test_user_read_failure_reports_get_user_step(parent, monkeypatch):
 
     identity = Mock()
     identity.get_tenancy.return_value.data = SimpleNamespace(id=parent.domain.tenancy_ocid)
-    identity.get_user.side_effect = oci.exceptions.ServiceError(403, "Forbidden", {}, "SECRET")
+    identity.get_domain.return_value.data = SimpleNamespace(
+        id=parent.domain.domain_ocid,
+        compartment_id=parent.domain.tenancy_ocid,
+        url=parent.domain.url,
+        home_region=parent.domain.home_region,
+        lifecycle_state="ACTIVE",
+    )
     monkeypatch.setattr("oci_governance_center.auth.scanner.client", lambda *_: identity)
+
+    def denied(*args, **kwargs):
+        raise oci.exceptions.ServiceError(403, "Forbidden", {}, "SECRET")
+
+    monkeypatch.setattr("oci_governance_center.auth.scanner.all_items", denied)
     with pytest.raises(PublicFailure) as caught:
         bind_identity(object(), parent.domain, parent.user_ocid)
     message = public_error(caught.value)
-    assert "GetUser" in message and "HTTP 403" in message
+    assert "ListUsers" in message and "HTTP 403" in message
     assert "SECRET" not in message
-    identity.get_domain.assert_not_called()
+    identity.get_user.assert_not_called()

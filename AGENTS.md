@@ -170,7 +170,7 @@ The remaining specifications await separate review.
 - An installation with no enrolled parent presents a first-run web enrollment wizard. An
   **operator-supplied setup password** protects it before OIDC is configured. Disable that password
   after enrollment; subsequent configuration and parent replacement require `ogc_admin` login.
-- The wizard collects the parent tenancy OCID, its **default identity-domain GUID**, and other
+- The wizard collects the parent tenancy OCID, its **selected scanner identity-domain GUID**, and other
   required metadata such as home region and OGC's callback/base URL. Treat domain GUID, domain
   OCID, domain URL and tenancy OCID as distinct values and verify their relationships.
 - Generate setup Terraform with a **Deploy to Oracle Cloud** Resource Manager button and a
@@ -180,10 +180,10 @@ The remaining specifications await separate review.
 
 ### 6.2 Parent setup and completion
 
-The parent setup creates an API-key-capable user named `ogc` in its **default identity domain**,
+The parent setup creates an API-key-capable user named `ogc` in its **selected identity domain (default or non-default)**,
 the `ogc_scanner`, `ogc_viewer` and `ogc_admin` groups, required memberships and local read policies,
 and a dedicated OIDC application for human login. These are identity-domain groups, not built-in
-OCI administrator roles. The administrator selects an existing default-domain human user;
+OCI administrator roles. The administrator selects an existing selected-domain human user;
 setup adds that user to `ogc_admin` so initial application administration is possible.
 
 The administrator generates the scanner key pair locally. Setup registers **only the public key**
@@ -205,14 +205,14 @@ and verification are complete. Resource creation or Terraform success alone is n
 
 ### 6.3 Human login and application authorization
 
-Human login uses OIDC through the enrolled parent's **default identity domain**, with its own
+Human login uses OIDC through the enrolled parent's **selected identity domain (default or non-default)**, with its own
 client ID and secret. Authorization requests use only `urn:opc:idm:__myscopes__`; no ID token,
 openid/profile/groups scopes or Me lookup are required. Verify the returned user access token and
 bind Asserter membership results to that user using group IDs. Login is separate from scanner
 authentication; scanners never use those client credentials. Only the parent's groups determine
 application access:
 
-| Parent default-domain group | Application access |
+| Parent selected-domain group | Application access |
 |---|---|
 | `ogc_viewer` | Login and view collected data, findings and reports across the parent and every configured child; no configuration changes. |
 | `ogc_admin` | Login, view organization-wide data and manage configuration, including scanner credentials, child setup, pause/resume and parent replacement. |
@@ -249,13 +249,13 @@ tenancies its billing covers); children never need it.
 Map the actual collector operations to current OCI resource types and least-privilege read grants
 before publishing the templates. The application-access groups are not scanner resource permissions.
 
-The default-domain scanner identity must scan **every identity domain in its tenancy, including
+The selected-domain scanner identity must scan **every identity domain in its tenancy, including
 new domains**, using tenancy-level read grants. Do not require separate users, trusts or routine
 Terraform updates per target domain. Discover domains on subsequent scans and read their resources.
 Validate this behavior for users, groups and memberships with the actual SDK endpoints. Any denied
 or unsupported domain read is an explicit coverage gap, never proof of an empty domain.
 **Default scope (2026-10-27):** each tenancy reads users, groups, dynamic groups and API keys from
-its **default domain only**; reading every domain is a per-tenancy administrator opt-in on the Scan
+its **selected scanner domain only**; reading every domain is a per-tenancy administrator opt-in on the Scan
 tab. The grants stay tenancy-level so opting in needs no setup change. Subjects in unread domains
 are unknown to analysis, never missing or unused.
 
@@ -264,10 +264,10 @@ alone grants no child access. **Endorse/Admit policies are not an OGC access mec
 
 ### 6.5 Child Configure and setup
 
-For each discovered child, Configure asks for its **default identity-domain URL** plus the child
+For each discovered child, Configure asks for its **selected scanner identity-domain URL** plus the child
 confidential application's **client ID and secret**. Other child metadata is discovered automatically.
 OGC derives its GUID from the validated URL, exchanges the parent JWT for a child UPST, and uses
-child credentials to discover the child's home region and active Default-domain OCID. Match the
+child credentials to discover the child's home region and active selected-domain OCID. Match the
 URL and domain ownership to the selected organization child. Search the child domain for exactly
 one active service user with `userName eq "ogc"`; discover its user OCID automatically. Validate
 that user and domain against child-tenancy IAM before saving configuration or enabling monitoring.
@@ -279,10 +279,10 @@ Generate a child-specific Terraform bundle and Deploy to Oracle Cloud button. Th
 signs into that child tenancy and reviews/applies its stack. Supply equivalent OCI Console
 instructions for customers performing setup manually. Both paths create the same prerequisites:
 
-1. A child-local `ogc` service user in the default domain and the groups/memberships required
+1. A child-local `ogc` service user in the selected domain and the groups/memberships required
    for local scanning, including `ogc_scanner`. No child API key or scanner password is created.
 2. Local tenancy-level read policies covering the required resources across all identity domains.
-3. Identity Propagation Trust in the child's default domain, trusting the **parent default domain**
+3. Identity Propagation Trust in the child's selected domain, trusting the **selected parent domain**
    and mapping only the authorized parent `ogc` principal to the child-local `ogc` service user.
    Bind the actual issuer, verification keys and required claims; do not use wildcard parent users.
 4. An active confidential application bound to the trust's OAuth client allow-list. The admin
@@ -314,10 +314,10 @@ configuration and enter it in OGC. No secret is printed in ordinary Terraform ou
 child credentials separately from child metadata and removes them on parent replacement. Protect
 Terraform state because it may contain the application's generated secret.
 
-1. Make an OCI API-key-signed request as the parent `ogc` user to the parent default-domain token
+1. Make an OCI API-key-signed request as the parent `ogc` user to the parent selected-domain token
    endpoint to obtain that user's JWT access token. This is a domain-issued token, not a locally
    minted assertion claiming to be issued by the domain.
-2. Exchange that parent JWT through WIF at the child's default domain, authenticating the caller
+2. Exchange that parent JWT through WIF at the child's selected domain, authenticating the caller
    with the child's confidential application client ID/secret using HTTP Basic. Its trust maps the exact
    parent principal to the child `ogc` service user and returns a child UPST.
 3. Validate the returned principal and owning tenancy. Use the UPST with its bound signing key
@@ -387,7 +387,7 @@ recurring schedule. Support exactly **daily** (time of day) and **weekly** (week
 day), with an explicit IANA timezone. Administrators may update or disable recurrence; viewers
 may inspect the schedule, next run and history. Recurrence is initially disabled. Full scans
 include parent and configured, unpaused children, governance and Audit, limited by each tenancy's
-collection settings (Cloud Guard, Cloud Advisor, identities from the default domain or all
+collection settings (Cloud Guard, Cloud Advisor, identities from the selected scanner domain or all
 domains, policies, Audit; organization cost on the parent; `docs/scanning.md`). Disabled datasets are not read and are not
 coverage gaps; stored data for them is kept and labeled.
 
@@ -417,7 +417,7 @@ worker's tenancy locks and exits immediately. Long Audit
 ranges log progress every 24 hours of history (2026-10-27).
 
 Collection settings are per tenancy (`docs/scanning.md`); the default reads only the tenancy's
-default identity domain. `ogc_admin` may **ignore**, **mark closed** or **reopen** any finding,
+selected scanner identity domain. `ogc_admin` may **ignore**, **mark closed** or **reopen** any finding,
 including coverage findings. Triage is stored apart from evaluated findings, applied on read
 (status `ignored`/`closed`), logged as a control event, cleared on parent replacement, and never
 writes to OCI. Ignored findings stay ignored across scans; closed findings reopen when a later
@@ -447,7 +447,7 @@ login or refresh grants.
 Record scope, issuer/key relationships, subject mapping, exchange caller authorization, expiration
 and signing-key binding. Reject wrong principals, issuers, children, domains and expired assertions.
 
-Verify default-domain scanner access to users, groups and memberships across **existing and newly
+Verify selected-domain scanner access to users, groups and memberships across **existing and newly
 created domains**, with tenancy-level policies and no per-domain scanner setup. The administrator
 performs test provisioning separately; OGC only reads resources. Document exact missing permissions
 or API limitations as validation blockers rather than silently changing the design.
@@ -476,7 +476,7 @@ after parent enrollment and render them as Not configured until their own setup 
 
 ### 7.4 Implement child configuration and monitoring
 
-Implement Configure → default-domain GUID and verified metadata → Terraform/deploy-button or
+Implement Configure → selected-domain URL, client credentials and verified metadata → Terraform/deploy-button or
 manual setup → Verify → automatic monitoring. Preserve an explicit distinction between invalid
 identity/authentication and individual dataset failures; partial access starts partial monitoring.
 
@@ -665,7 +665,7 @@ implementation status is in `docs/implementation/status.md`; checked items here 
       Audit coverage spans `OGC_INACTIVE_DAYS`. OCI API keys do not expire, so age is flagged against
       `OGC_API_KEY_MAX_AGE_DAYS` (2026-10-22).
 - [x] Per-tenancy collection settings on the Scan tab (Cloud Guard, Cloud Advisor, identities,
-      policies, Audit; identity domains default-only or all). Default reads only the default
+      policies, Audit; identity domains scanner-only or all). Default reads only the selected scanner
       identity domain. Subjects in unread domains are unknown: never stale or unused (2026-10-27).
 - [x] Resource organization shows policy statements per compartment and per hierarchy
       (compartment plus every ancestor up to the tenancy); hidden, never zero, when policy
@@ -715,3 +715,19 @@ and their descendants until all ancestors are known. Deleted compartments withou
 also show unknown counts. Cost queries use Usage API depth 6 (root depth 1); deeper costs are
 aggregated into depth-6 ancestors. Cost totals group by tenancy OCID, keeping equal display names
 separate. Labels do not establish tenancy identity.
+
+### Selected scanner domains (2026-10-27)
+
+The former Default-domain-only restriction is superseded: parent and child scanners may use a
+selected default or non-default identity domain. Parent setup records tenancy home region and
+identity-domain region independently. Verify metadata ownership, active state, OCID, URL and domain
+region; verify the scanner using the selected domain Users API, not legacy IAM GetUser. The scanner
+user must match ogc, its configured/discovered OCID, domain and tenancy. Domains in tenancy
+compartments are supported. Login/groups remain in the selected parent domain in this release.
+
+Child setup selects its domain by URL and discovers region/metadata and the ogc service user.
+Scanner-domain-only collection means exactly the selected domain; all-domain mode uses each
+active domain's own region. Tenancy-wide service collection keeps using tenancy home region.
+Terraform no longer checks the domain display name Default; group policies use the scanner group
+OCID. Parent public-key registration uses the selected-domain ApiKey resource. Existing stack
+state for the old IAM API-key resource requires reviewed import/migration, not automatic deletion.

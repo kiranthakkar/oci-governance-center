@@ -4,7 +4,9 @@ This catalog supersedes the old Endorse/Admit templates for the new implementati
 never applies these policies. The administrator-applied parent/child bundles and manual guide share
 the same statement generator in `provisioning/bundle.py`; download them through OGC or `ogc setup-package`.
 
-The scanner group is in the target tenancy's default identity domain:
+The scanner group belongs to the selected default or non-default identity domain.
+The following name-qualified example assumes Default; replace it with the chosen domain. Generated
+Terraform uses `Allow group id <scanner-group-OCID>` instead, avoiding a hard-coded domain name:
 
 ```text
 Allow group 'Default'/'ogc_scanner' to read tenancies in tenancy
@@ -32,7 +34,7 @@ Existing installations add it to the parent's OGC policy by hand.
 
 | Read surface | SDK client operations |
 |---|---|
-| Identity/regions | IdentityClient get_tenancy/get_user/get_domain/list_compartments/list_region_subscriptions/list_policies/list_domains |
+| Identity/regions | IdentityClient get_tenancy/get_domain/list_compartments/list_region_subscriptions/list_policies/list_domains |
 | Every domain | IdentityDomainsClient list_users/list_groups/list_dynamic_resource_groups/list_api_keys |
 | Organization | OrganizationClient list_organizations/list_organization_tenancies |
 | Cloud Guard/Zones | CloudGuardClient get_configuration/list_problems/list_security_zones |

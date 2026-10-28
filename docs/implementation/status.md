@@ -10,13 +10,13 @@ Historical OSC designs are identified in the [documentation index](../README.md)
 | Area | Current behavior |
 |---|---|
 | Parent enrollment | Setup-password-protected wizard; encrypted retry drafts; scanner verification plus final human administrator sign-in |
-| Human access | Parent Default-domain OAuth Code + PKCE; only `urn:opc:idm:__myscopes__`; signed user access-token validation and Asserter group-ID checks; no ID-token dependency |
+| Human access | Parent selected-domain OAuth Code + PKCE; only `urn:opc:idm:__myscopes__`; signed user access-token validation and Asserter group-ID checks; no ID-token dependency |
 | Authorization | `ogc_viewer` reads organization-wide data; `ogc_admin` also manages configuration/triage; membership rechecked every five minutes and before writes |
 | Scanner identity | Parent API key for parent reads and JWT issuance; child confidential client HTTP Basic authentication for JWT-to-UPST; worker-local bound keys and token renewal |
-| Child enrollment | URL plus child app client ID/secret; automatic home-region/domain discovery; username lookup for one active `ogc` service user; child-tenancy identity validation |
+| Child enrollment | Selected-domain URL plus child app client ID/secret; automatic home-region/domain discovery; username lookup for one active `ogc` service user; child-tenancy identity validation |
 | Setup packages | Administrator-applied Terraform/Resource Manager bundles and manual guides; child service user/group/policies/app/trust; no child API keys; exact unquoted `sub eq ogc` rule for subject `ogc` |
 | Collection | IAM compartments/regions/domains/policies; identity users/groups/dynamic groups/API-key metadata; Cloud Guard/Security Zones; Cloud Advisor; Audit; parent organization cost |
-| Collection settings | Per tenancy; enabled by default, identities from Default domain only unless All identity domains is selected; cost is parent-only |
+| Collection settings | Per tenancy; enabled by default, identities from selected scanner domain only unless All identity domains is selected; cost is parent-only |
 | Scan controls | Separate worker, durable queue, on-demand organization scans, optional daily/weekly timezone-aware recurrence, coalescing, heartbeat and lease recovery |
 | Diagnostics | Coverage findings, dataset/tenancy/region filters, scan details and finish-time scope snapshots; no raw terminal logs or credentials in UI |
 | Finding triage | Administrator Ignore/Mark closed/Reopen decisions; local history and control events; effective state visible in views and exports |
@@ -133,3 +133,14 @@ Application request summaries and response headers carry generated request IDs. 
 within that request share the ID. Unexpected failures report exception class and bounded stack
 locations, not raw messages, source text or local variables. Queries, credentials, bodies and
 unmatched raw paths are omitted. This logging does not configure TLS or change the load balancer.
+
+## Selected-domain support
+
+Default and non-default scanner domains are accepted. Parent configuration records domain region
+separately from tenancy home region; metadata validates a supplied region or supplies it when omitted.
+User binding uses the selected identity-domain Users API and validates OCID, username, active state,
+domain and tenancy rather than legacy IAM GetUser. Domain ownership includes tenancy compartments.
+Child discovery selects by verified URL rather than Default display name, and collection routes each
+domain to its metadata region. The parent selected domain also supplies human login and group IDs.
+Generated policies bind scanner group OCIDs; parent public keys use the identity-domain ApiKey resource.
+Existing Terraform key-resource state needs reviewed migration/import before a new apply.

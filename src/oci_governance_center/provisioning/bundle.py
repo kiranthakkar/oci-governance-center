@@ -26,14 +26,11 @@ RESOURCES = (
 )
 
 
-def policies(parent: bool) -> list[str]:
+def policies(parent: bool, group: str = "'Default'/'ogc_scanner'") -> list[str]:
     """Local tenancy read grants only; never Endorse/Admit or resource writes."""
     # Organization discovery and organization-wide cost (Usage API) are read from the parent only.
     resources = RESOURCES + (("organizations-family", "usage-report") if parent else ())
-    return [
-        f"Allow group 'Default'/'ogc_scanner' to read {resource} in tenancy"
-        for resource in resources
-    ]
+    return [f"Allow group {group} to read {resource} in tenancy" for resource in resources]
 
 
 def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
@@ -44,7 +41,7 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
         for name, description in {
             "tenancy_ocid": "Target tenancy OCID (parent or child according to this package)",
             "region": "Target tenancy home region",
-            "domain_ocid": "Target DEFAULT identity-domain OCID (not its GUID)",
+            "domain_ocid": "Selected scanner identity-domain OCID (not its GUID)",
         }.items()
     }
     resources: dict[str, Any] = {}
@@ -64,7 +61,7 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
                 },
                 "initial_admin_id": {
                     "type": "string",
-                    "description": "Existing Default-domain human user's SCIM ID",
+                    "description": "Existing selected-domain human user's SCIM ID",
                 },
                 "callback_url": {
                     "type": "string",
@@ -84,11 +81,11 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
             {
                 "parent_issuer": {
                     "type": "string",
-                    "description": "Verified parent-default-domain JWT issuer",
+                    "description": "Verified parent selected-domain JWT issuer",
                 },
                 "parent_jwks_url": {
                     "type": "string",
-                    "description": "Parent default-domain SigningCert/jwk URL",
+                    "description": "Parent selected-domain SigningCert/jwk URL",
                 },
                 "parent_subject": {
                     "type": "string",
@@ -106,10 +103,11 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
         "precondition": [
             {
                 "condition": (
-                    '${data.oci_identity_domain.default.display_name == "Default" && '
-                    "data.oci_identity_domain.default.compartment_id == var.tenancy_ocid}"
+                    "${contains(concat([var.tenancy_ocid], "
+                    "[for c in data.oci_identity_compartments.tenancy.compartments : c.id]), "
+                    "data.oci_identity_domain.default.compartment_id)}"
                 ),
-                "error_message": "OGC supports only the target tenancy's default identity domain.",
+                "error_message": "Selected domain must belong to this tenancy or its compartments.",
             }
         ]
     }
@@ -147,10 +145,12 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
                 "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
             }
         groups["admin"]["members"] = [{"type": "User", "value": "${var.initial_admin_id}"}]
-        resources["oci_identity_api_key"] = {
+        resources["oci_identity_domains_api_key"] = {
             "scanner": {
-                "user_id": "${oci_identity_domains_user.scanner.ocid}",
-                "key_value": "${var.scanner_public_key}",
+                "idcs_endpoint": "${data.oci_identity_domain.default.url}",
+                "schemas": ["urn:ietf:params:scim:schemas:oracle:idcs:apikey"],
+                "key": "${var.scanner_public_key}",
+                "user": [{"value": "${oci_identity_domains_user.scanner.id}"}],
             }
         }
         resources["oci_identity_domains_app"] = {
@@ -213,7 +213,7 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
             "compartment_id": "${var.tenancy_ocid}",
             "name": "ogc-local-read",
             "description": "Local read-only OGC inventory",
-            "statements": policies(parent),
+            "statements": policies(parent, "id ${oci_identity_domains_group.scanner.ocid}"),
             "depends_on": ["oci_identity_domains_group.scanner"],
         }
     }
@@ -226,7 +226,9 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
     }
     if parent:
         outputs["login_client_id"] = {"value": "${oci_identity_domains_app.login.name}"}
-        outputs["scanner_fingerprint"] = {"value": "${oci_identity_api_key.scanner.fingerprint}"}
+        outputs["scanner_fingerprint"] = {
+            "value": "${oci_identity_domains_api_key.scanner.fingerprint}"
+        }
     else:
         outputs["exchange_client_id"] = {"value": "${oci_identity_domains_app.exchange.name}"}
         outputs["trust_id"] = {
@@ -239,7 +241,16 @@ def terraform(kind: Literal["parent", "child"]) -> dict[str, Any]:
         },
         "provider": {"oci": {"region": "${var.region}"}},
         "variable": variables,
-        "data": {"oci_identity_domain": {"default": {"domain_id": "${var.domain_ocid}"}}},
+        "data": {
+            "oci_identity_domain": {"default": {"domain_id": "${var.domain_ocid}"}},
+            "oci_identity_compartments": {
+                "tenancy": {
+                    "compartment_id": "${var.tenancy_ocid}",
+                    "compartment_id_in_subtree": True,
+                    "access_level": "ACCESSIBLE",
+                }
+            },
+        },
         "resource": resources,
         "output": outputs,
     }
@@ -250,9 +261,10 @@ def manual(kind: Literal["parent", "child"]) -> str:
     common = """# OCI Governance Center setup
 
 1. Sign in to the TARGET tenancy in OCI Console using an administrator authorized to manage
-   its default identity domain and tenancy IAM policies. Confirm the tenancy OCID and home region.
-2. Open Identity & Security → Domains → Default. Record the domain OCID, GUID and domain URL;
-   these are three distinct identifiers. Never select a secondary domain.
+   its selected identity domain and tenancy IAM policies. Confirm the tenancy OCID and home region.
+2. Open Identity & Security → Domains → your selected scanner domain.
+   Record its OCID, GUID, URL and region. Default and non-default domains are supported.
+   The domain region may differ from the tenancy home region.
 3. Open Users and create the `ogc` user described below.
 4. Open Groups, create `ogc_scanner`, and add `ogc` to that group.
 5. Open Identity & Security → Policies in the tenancy root and create `ogc-local-read` with
@@ -265,7 +277,7 @@ def manual(kind: Literal["parent", "child"]) -> str:
 6. Create `ogc` as an API-key-capable ordinary user with a recovery email. Generate an RSA
    key pair locally (at least 2048 bits). On the user's API Keys page register ONLY its public key.
    Keep the private key local until securely uploading it to OGC. Never use a stack variable.
-7. Create `ogc_admin` and `ogc_viewer` in Default. Add your selected existing human administrator
+7. Create `ogc_admin` and `ogc_viewer` in the selected domain. Add your selected human administrator
    to `ogc_admin`. Either group permits OGC login; `ogc_viewer` has read-only application access.
    Manage memberships here in OCI; OGC does not modify memberships.
 8. Open Applications → Add application → Confidential application. Name it OGC Login.
@@ -294,12 +306,13 @@ application page, not an ordinary stack output. Never upload Terraform state to 
     else:
         detail = """## Child service user and WIF trust
 
-6. Create `ogc` as a non-interactive service user in Default. No password and no API key.
+6. Create `ogc` as a non-interactive service user in the selected domain.
+   No password and no API key.
 7. Create and activate a Confidential application named OGC Parent Token Exchange using the
    Custom Web App template, OAuth client enabled, client type Confidential and Client Credentials
    grant. Record its OAuth client ID (the app's `name`, not its SCIM resource `id`).
 8. Create an active JWT Identity Propagation Trust named ogc-parent-trust. Set issuer and
-   publicKeyEndpoint to the parent default domain's issuer and signing-key/JWKS URL. Set
+   publicKeyEndpoint to the parent selected domain's issuer and signing-key/JWKS URL. Set
    subjectType=User, subjectClaimName=sub and subjectMappingAttribute=userName. Set oauthClients
    to the confidential application's OAuth client ID. Enable allowImpersonation and add the
    exact `sub eq <parent ogc username>` rule (normally `sub eq ogc`, without quotes). Use the
@@ -308,7 +321,7 @@ application page, not an ordinary stack output. Never upload Terraform state to 
    Target the child ogc service user's SCIM ID.
    Terraform references the application and user directly so they exist before trust creation.
    Do not use wildcard rules, trust all parent users, or configure a child API key.
-9. Return to OGC Configure and enter the child default-domain URL and the confidential app
+9. Return to OGC Configure and enter the child scanner-domain URL and the confidential app
    client ID/secret. Retrieve the secret securely from the application configuration.
    OGC obtains a child UPST and discovers the domain identifiers, home region, and active
    service user named ogc. No user OCID needs to be copied. Accessible datasets
@@ -326,8 +339,13 @@ that the tenancy accepts the end-to-end token exchange. No child API key is crea
 Reference sample:
 https://github.com/balajepalli84/token-exchange-tf/tree/main/Resource_Manager
 """
-    statements = "\n".join(policies(kind == "parent"))
-    return common + detail + "\n## Local read policy\n\n```text\n" + statements + "\n```\n"
+    statements = "\n".join(policies(kind == "parent", "id <ogc_scanner group OCID>"))
+    return (
+        common + detail + "\n## Local read policy\n\n"
+        "Replace the group OCID placeholder with the selected domain scanner group OCID.\n"
+        "Terraform resolves that group OCID automatically, including non-default domains.\n"
+        "\n```text\n" + statements + "\n```\n"
+    )
 
 
 def bundle(kind: Literal["parent", "child"]) -> bytes:

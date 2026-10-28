@@ -11,9 +11,9 @@ and [operator guide](docs/operations.md) for current setup, settings and trouble
 
 - Setup-password-protected parent enrollment, with Terraform ZIPs and manual setup instructions.
 - Parent API-key scanner and separate OAuth Code + PKCE human login.
-- Parent default-domain `ogc_viewer` / `ogc_admin` authorization, five-minute membership checks,
+- Parent selected-domain `ogc_viewer` / `ogc_admin` authorization, five-minute membership checks,
   checks before configuration changes, and session downgrade/revocation.
-- Organization discovery, child default-domain configuration, API-key → parent JWT → child UPST
+- Organization discovery, child scanner-domain configuration, API-key → parent JWT → child UPST
   exchange, and worker-local token renewal. Children use confidential-app client credentials for
   exchange and have no API keys.
 - Separate bounded collection scheduler: IAM/domain inventory, Cloud Guard, Security Zones,
@@ -93,7 +93,7 @@ See [scan controls and scheduling](docs/scanning.md) for recovery and daylight-s
 
 Open the public URL, enter the setup password, and follow the enrollment wizard. Apply the parent
 setup as a tenancy administrator, provide the scanner and OIDC credentials, and finish with an
-`ogc_admin` sign-in. Configure each discovered child with its default-domain URL and confidential-app
+`ogc_admin` sign-in. Configure each discovered child with its scanner-domain URL and confidential-app
 client ID/secret; OGC discovers the domain identifiers, home region and service user named `ogc`.
 Failed scanner authentication does
 not prevent OIDC login or viewing historical data.
@@ -162,7 +162,7 @@ and isolated browser profile with synthetic credentials, submits the setup form,
 browser-generated Origin header and successful onboarding unlock. No OCI credentials are used.
 
 Parent enrollment reports the verification step that failed, such as API-key validation,
-GetTenancy/GetUser/GetDomain, identity-domain ListUsers/ListGroups, or organization discovery.
+GetTenancy/GetDomain, selected-domain ListUsers/ListGroups, or organization discovery.
 The same safe diagnostic is written to the server log. Error responses omit raw OCI bodies,
 private keys, and login secrets. When requesting help, share the step and safe diagnostic only.
 
@@ -221,3 +221,10 @@ raw bearer tokens and request payloads are not exposed in the UI.
 For load-balancer failures, use the [web diagnostics guide](docs/operations.md#web-request-and-connection-diagnostics).
 `ogc web` reports safe parser rejection reasons, including HTTPS/TLS sent to its plain HTTP port.
 Use HTTP/1.1 for backend forwarding when HTTPS terminates at the load balancer.
+
+
+Scanner users can belong to a **default or non-default identity domain**. Parent enrollment keeps
+**tenancy home region** separate from **identity-domain region**; enter the latter when different.
+User verification queries the selected domain's Users API rather than legacy IAM `GetUser`.
+Terraform policies bind the created scanner group by OCID. Child Configure discovers the selected
+domain and its region from the supplied URL. See [selected-domain setup](docs/operations.md#selected-scanner-domains-and-regions).

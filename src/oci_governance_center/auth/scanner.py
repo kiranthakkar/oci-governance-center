@@ -56,58 +56,71 @@ def api_signer(parent: Parent) -> Any:
     )
 
 
-def bind_identity(signer: Any, domain: Domain, expected_user: str) -> None:
-    """Verify GetTenancy/GetUser/GetDomain ownership; requires read tenancies/users/domains."""
-    with verification_step("default-domain metadata validation"):
+def verified_domain(signer: Any, domain: Domain) -> Domain:
+    """Bind a selected domain (including compartment-hosted domains) to its tenancy."""
+    with verification_step("identity-domain metadata validation"):
         domain.check_guid()
-    with verification_step("IAM client initialization"):
-        identity = client("identity", signer, domain.home_region)
     with verification_step("GetTenancy (parent/child tenancy access)"):
+        identity = client("identity", signer, domain.home_region)
         tenancy = identity.get_tenancy(domain.tenancy_ocid).data
-    with verification_step("GetUser (scanner identity access)"):
-        user = identity.get_user(expected_user).data
-    with verification_step("GetDomain (default identity-domain access)"):
-        actual = identity.get_domain(domain.domain_ocid).data
-    checks = (
-        (
-            tenancy.id == domain.tenancy_ocid,
-            "The returned tenancy does not match the configured tenancy.",
-        ),
-        (
-            user.id == expected_user,
-            "The returned scanner user does not match the configured user OCID.",
-        ),
-        (
-            user.compartment_id == domain.tenancy_ocid,
-            "The scanner user belongs to a different tenancy.",
-        ),
-        (user.lifecycle_state == "ACTIVE", "The scanner user is not active."),
-        (
-            actual.display_name == "Default",
-            "The configured identity domain is not the Default domain.",
-        ),
-        (
-            actual.compartment_id == domain.tenancy_ocid,
-            "The identity domain belongs to a different tenancy.",
-        ),
-        (
-            domain_origin(actual.url) == domain.url,
-            "The configured domain URL does not match GetDomain.",
-        ),
-        (actual.lifecycle_state == "ACTIVE", "The configured identity domain is not active."),
-    )
-    for passed, explanation in checks:
-        if not passed:
-            raise ScanAccessFailure(explanation)
+        if tenancy.id != domain.tenancy_ocid:
+            raise ScanAccessFailure("The returned tenancy does not match the configured tenancy")
+    with verification_step("GetDomain (selected identity-domain access)"):
+        regional = client("identity", signer, domain.identity_region)
+        actual = regional.get_domain(domain.domain_ocid).data
+        if actual.id != domain.domain_ocid:
+            raise ScanAccessFailure(
+                "The returned identity domain does not match the configured OCID"
+            )
+        if actual.compartment_id != domain.tenancy_ocid:
+            compartments = all_items(
+                identity.list_compartments,
+                domain.tenancy_ocid,
+                compartment_id_in_subtree=True,
+                access_level="ACCESSIBLE",
+            )
+            if not any(c.id == actual.compartment_id for c in compartments):
+                raise ScanAccessFailure("The identity domain belongs to a different tenancy")
+        if domain_origin(actual.url) != domain.url:
+            raise ScanAccessFailure("The configured domain URL does not match GetDomain")
+        if actual.lifecycle_state != "ACTIVE":
+            raise ScanAccessFailure("The configured identity domain is not active")
+        actual_region = actual.home_region
+        if domain.region and actual_region != domain.region:
+            raise ScanAccessFailure(
+                "The configured identity-domain region does not match GetDomain"
+            )
+        return Domain.model_validate({**domain.model_dump(), "region": actual_region})
+
+
+def bind_identity(signer: Any, domain: Domain, expected_user: str) -> None:
+    """Verify scanner ownership through its selected domain, never legacy IAM GetUser."""
+    selected = verified_domain(signer, domain)
+    with verification_step("identity-domain ListUsers (scanner identity access)"):
+        domains = client("domains", signer, selected.identity_region, selected.url)
+        users = all_items(
+            domains.list_users,
+            filter=f'ocid eq "{expected_user}"',
+            attributes="id,ocid,userName,active,domainOcid,tenancyOcid",
+        )
+        if len(users) != 1:
+            raise ScanAccessFailure("Expected one scanner user in the selected identity domain")
+        user = users[0]
+        if user.ocid != expected_user or user.user_name != "ogc" or user.active is not True:
+            raise ScanAccessFailure("The selected identity domain must contain the active ogc user")
+        if user.domain_ocid != selected.domain_ocid or user.tenancy_ocid != selected.tenancy_ocid:
+            raise ScanAccessFailure("The scanner user belongs to a different domain or tenancy")
 
 
 def verify_parent(parent: Parent) -> Parent:
-    """Verify key ownership/default-domain metadata and exact app group IDs via read-only APIs."""
+    """Verify key ownership/selected-domain metadata and exact app group IDs via read-only APIs."""
     with verification_step("API-key validation (unencrypted RSA PEM private key)"):
         signer = api_signer(parent)
-    bind_identity(signer, parent.domain, parent.user_ocid)
+    selected = verified_domain(signer, parent.domain)
+    parent = parent.model_copy(update={"domain": selected})
+    bind_identity(signer, selected, parent.user_ocid)
     with verification_step("identity-domain client initialization"):
-        domains = client("domains", signer, parent.domain.home_region, parent.domain.url)
+        domains = client("domains", signer, parent.domain.identity_region, parent.domain.url)
     with verification_step("identity-domain ListUsers (find the ogc scanner user)"):
         users = all_items(
             domains.list_users,
@@ -115,7 +128,7 @@ def verify_parent(parent: Parent) -> Parent:
             attributes="id,ocid,userName,groups",
         )
         if len(users) != 1 or users[0].user_name != "ogc":
-            raise ScanAccessFailure("Parent API key must belong to the default-domain ogc user")
+            raise ScanAccessFailure("Parent API key must belong to the selected-domain ogc user")
     with verification_step("identity-domain ListGroups (OGC groups and scanner membership)"):
         groups = all_items(
             domains.list_groups,
@@ -291,7 +304,7 @@ class Exchange:
         claims = verify_jwt(token, response.json(), str(expected_issuer))
         # Resolve the scanner through the configured OCID, never through token-controlled filters.
         domains = client(
-            "domains", self.signer, self.parent.domain.home_region, self.parent.domain.url
+            "domains", self.signer, self.parent.domain.identity_region, self.parent.domain.url
         )
         users = all_items(
             domains.list_users,
@@ -391,19 +404,29 @@ class Exchange:
             if len(home) != 1:
                 raise ScanAccessFailure("Could not identify one active child home region")
             region = home[0].region_name
-        with verification_step("child default-domain discovery"):
+        with verification_step("child selected-domain discovery"):
             identity = client("identity", signer, region)
+            compartments = [tenancy_ocid] + [
+                c.id
+                for c in all_items(
+                    identity.list_compartments,
+                    tenancy_ocid,
+                    compartment_id_in_subtree=True,
+                    access_level="ACCESSIBLE",
+                )
+                if c.lifecycle_state == "ACTIVE"
+            ]
             matches = [
                 d
-                for d in all_items(identity.list_domains, tenancy_ocid)
-                if d.display_name == "Default"
-                and d.compartment_id == tenancy_ocid
+                for compartment in compartments
+                for d in all_items(identity.list_domains, compartment)
+                if d.compartment_id == compartment
                 and d.lifecycle_state == "ACTIVE"
                 and domain_origin(d.url) == url
             ]
             if len(matches) != 1:
                 raise ScanAccessFailure(
-                    "The supplied URL does not identify the selected child's active Default domain"
+                    "The supplied URL does not identify one active domain in the selected child"
                 )
             domain = Domain(
                 tenancy_ocid=tenancy_ocid,
@@ -411,9 +434,10 @@ class Exchange:
                 guid=str(urlsplit(url).hostname).removeprefix("idcs-").split(".")[0],
                 url=url,
                 home_region=region,
+                region=matches[0].home_region,
             )
         with verification_step("child identity-domain lookup (ogc service user)"):
-            domains = client("domains", signer, region, url)
+            domains = client("domains", signer, domain.identity_region, url)
             users = all_items(
                 domains.list_users,
                 filter='userName eq "ogc"',
@@ -423,7 +447,9 @@ class Exchange:
                 ),
             )
             if len(users) != 1 or users[0].user_name != "ogc":
-                raise ScanAccessFailure("Expected exactly one ogc user in the child Default domain")
+                raise ScanAccessFailure(
+                    "Expected exactly one ogc user in the selected child domain"
+                )
             user = users[0]
             extension = user.urn_ietf_params_scim_schemas_oracle_idcs_extension_user_user
             if not user.active or extension is None or extension.service_user is not True:

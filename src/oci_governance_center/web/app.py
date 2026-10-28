@@ -631,7 +631,7 @@ def create_app(settings: Settings, service: Service | None = None) -> FastAPI:
     async def setup_metadata(request: Request) -> Response:
         await setup_access(request)
         values = await form(request)
-        domain = Domain.model_validate({key: values[key] for key in Domain.model_fields})
+        domain = Domain.model_validate({key: values.get(key, "") for key in Domain.model_fields})
         domain.check_guid()
         name = str(values.get("name", ""))
         if not name or len(name) > 120:

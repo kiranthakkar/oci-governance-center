@@ -10,7 +10,6 @@ OPERATIONS: dict[str, frozenset[str]] = {
     "identity": frozenset(
         {
             "get_tenancy",
-            "get_user",
             "get_domain",
             "list_compartments",
             "list_region_subscriptions",

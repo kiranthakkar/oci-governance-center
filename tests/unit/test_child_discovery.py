@@ -23,6 +23,7 @@ def discovery(parent, child, monkeypatch):
     domain = NS(
         id=child.domain.domain_ocid,
         display_name="Default",
+        home_region="eu-frankfurt-1",
         compartment_id=child.ocid,
         lifecycle_state="ACTIVE",
         url=child.domain.url,
@@ -35,9 +36,10 @@ def discovery(parent, child, monkeypatch):
         urn_ietf_params_scim_schemas_oracle_idcs_extension_user_user=NS(service_user=True),
     )
     region = NS(region_name="eu-frankfurt-1", is_home_region=True, status="READY")
-    sources = {"regions": [region], "domains": [domain], "users": [user]}
+    sources = {"regions": [region], "domains": [domain], "users": [user], "compartments": []}
     identity.list_region_subscriptions = "regions"
     identity.list_domains = "domains"
+    identity.list_compartments = "compartments"
     domains = NS(list_users="users")
     calls = []
 
@@ -82,7 +84,7 @@ def test_discovers_domain_home_region_and_service_user(child, discovery):
         "ordinary-user",
         "missing-ocid",
         "wrong-domain",
-        "secondary-domain",
+        "inactive-domain",
         "wrong-tenancy",
         "missing-home-region",
     ],
@@ -105,8 +107,8 @@ def test_discovery_rejects_invalid_child_artifacts(child, discovery, failure):
         sources["users"][0].ocid = None
     elif failure == "wrong-domain":
         sources["domains"][0].url = "https://idcs-" + "c" * 32 + ".identity.oraclecloud.com"
-    elif failure == "secondary-domain":
-        sources["domains"][0].display_name = "Secondary"
+    elif failure == "inactive-domain":
+        sources["domains"][0].lifecycle_state = "INACTIVE"
     elif failure == "wrong-tenancy":
         sources["domains"][0].compartment_id = "ocid1.tenancy.oc1..wrong"
     else:
@@ -197,3 +199,14 @@ def test_child_form_and_post_need_only_url(settings, service, parent, child, mon
     assert 'name="client_secret" type="password"' in page.text
     assert "synthetic-child-secret" not in page.text
     assert "Leave blank to retain" in page.text
+
+
+def test_child_scanner_domain_can_be_non_default_in_another_region(child, discovery):
+    exchange, sources, calls, bind, signer = discovery
+    sources["domains"][0].display_name = "Automation"
+    sources["domains"][0].home_region = "uk-london-1"
+    domain, user = exchange.discover_child(child.ocid, child.domain.url)
+    assert domain.home_region == "eu-frankfurt-1"
+    assert domain.region == "uk-london-1"
+    assert ("domains", "uk-london-1", child.domain.url) in calls
+    bind.assert_called_once_with(signer, domain, user)

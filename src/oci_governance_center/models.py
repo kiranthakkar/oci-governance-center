@@ -48,6 +48,12 @@ class Domain(Model):
     guid: str
     url: str
     home_region: str = Field(pattern=r"^[a-z]+-[a-z]+-\d+$")
+    region: str = Field(default="", pattern=r"^(?:[a-z]+-[a-z]+-\d+)?$")
+
+    @property
+    def identity_region(self) -> str:
+        """The selected domain's region, independent from the tenancy home region."""
+        return self.region or self.home_region
 
     @field_validator("url")
     @classmethod

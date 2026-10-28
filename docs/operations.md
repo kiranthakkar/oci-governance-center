@@ -71,8 +71,8 @@ TLS terminates at the load balancer; `ogc web` itself serves HTTP.
 ## Parent setup and human login
 
 Generate/download a parent setup ZIP through the wizard or
-`ogc setup-package parent /tmp/ogc-parent.zip`. An administrator applies it in the parent's Default
-domain using Terraform or Resource Manager. It creates the scanner user/group, human login groups,
+`ogc setup-package parent /tmp/ogc-parent.zip`. An administrator applies it in the parent's selected
+scanner domain using Terraform or Resource Manager. It creates the scanner user/group, human login groups,
 initial admin membership, read policies and dedicated confidential login app. It does not deploy OGC.
 Generate the scanner RSA key pair outside Terraform; supply only its public key to the stack.
 
@@ -83,7 +83,7 @@ and a human `ogc_admin` sign-in are both required before the candidate becomes a
 Human login uses Authorization Code + PKCE, requesting only `urn:opc:idm:__myscopes__`.
 It requires a signed user access token, not an ID token. OGC validates issuer, keys, expiration,
 API audience and OAuth client binding, then calls `/admin/v1/Asserter` with that access token
-and `includeMemberships=true`. Only configured parent Default-domain group IDs authorize access:
+and `includeMemberships=true`. Only configured parent selected-domain group IDs authorize access:
 `ogc_viewer` reads organization data; `ogc_admin` also changes configuration and triages findings.
 Membership is checked every five minutes and before configuration writes. Login credentials are
 independent of the scanner credentials; a scanner-key failure must not prevent repair through the UI.
@@ -96,7 +96,7 @@ cookie. Reverse proxies must preserve the configured Host; forwarded headers do 
 
 For each discovered child, apply its setup package as a child administrator. The package creates:
 
-1. The child Default-domain non-interactive `ogc` service user.
+1. The child selected-domain non-interactive `ogc` service user.
 2. `ogc_scanner`, its user membership and tenancy-local read policies.
 3. An active confidential application, **OGC Parent Token Exchange**.
 4. An active JWT propagation trust with the parent's issuer/JWKS, the app's OAuth client ID,
@@ -107,9 +107,9 @@ For a parent JWT whose subject is `ogc`, enter `parent_subject=ogc`; the generat
 the Terraform scanner-subject output is a SCIM ID and does not by itself establish the JWT's `sub`.
 Keep the app's OAuth client ID (`name`) distinct from its SCIM resource ID (`id`).
 
-Child Configure asks for the **Default-domain URL and child app client ID/secret**. No child user
+Child Configure asks for the **scanner-domain URL and child app client ID/secret**. No child user
 OCID, domain OCID, GUID or region needs manual entry. OGC obtains a child UPST, discovers the
-child's home region/Default-domain metadata, searches `userName eq "ogc"`, requires one active
+child's tenancy home region/selected-domain metadata, searches `userName eq "ogc"`, requires one active
 service user, and validates the discovered identities against the selected child tenancy.
 
 | Operation | Credential |
@@ -128,7 +128,7 @@ The app secret is not an ordinary Terraform output; retrieve it securely from it
 Terraform state may contain it. Protect that state and never upload it to OGC.
 
 Configured children start monitoring automatically; the Scan tab controls what to collect in each
-tenancy. Identities default to the Default domain only; enable All identity domains when required.
+tenancy. Identities default to the selected scanner domain only; enable All identity domains when required.
 These settings do not change the scanner's tenancy-wide read grants.
 
 ## Reading scan results
@@ -169,7 +169,7 @@ its hierarchy and descendants' hierarchy totals remain unavailable until all anc
 | Scan stays Queued | Start `ogc scheduler` with the same data root/key. Check the worker-offline warning and lease-wait explanation in Scan. Refresh the page. |
 | Worker finished, result Partial | Read incomplete Coverage rows or scan details; successful datasets remain available. A backfill progress message is distinct from an API error. |
 | Child token endpoint returns 400 | Read the safe OAuth error/category and request ID. Check child client ID/secret, trust `oauthClients`, parent issuer/JWKS, exact unquoted subject rule and mapped service user. HTTP status alone does not prove which prerequisite failed. |
-| Parent assertion mismatch | Verify the parent key belongs to Default-domain `ogc` and check its subject mapping. OGC supports matching username, SCIM ID or OCID with consistent identity claims. Do not log bearer tokens. |
+| Parent assertion mismatch | Verify the parent key belongs to selected-domain `ogc` and check its subject mapping. OGC supports matching username, SCIM ID or OCID with consistent identity claims. Do not log bearer tokens. |
 | Cost read denied | Add the parent-only `read usage-report` statement using a tenancy administrator, then rescan. OGC does not apply policies. |
 | Cross-origin form rejected | Compare the browser origin with `OGC_PUBLIC_BASE_URL`; omit `/setup` from that setting and restart the web app. |
 | Fernet / unreadable credentials | Validate key format; restore the original key for existing data. Do not silently re-enroll or delete data. |
@@ -246,3 +246,41 @@ a backend protocol mismatch; fix the load balancer forwarding protocol, then ret
 request reaches OGC, use `X-OGC-Request-ID` to find its status/error events. A 502 without a matching
 connection/request event also requires checking load balancer reachability, timeouts and backend
 selection; health-probe success alone does not prove normal forwarding works.
+
+## Selected scanner domains and regions
+
+Default and non-default identity domains are supported for both parent and child `ogc` identities.
+The selected parent domain also hosts the OGC login app and `ogc_admin`/`ogc_viewer` groups in this
+release; there is no separate human-login-domain setting.
+
+Parent enrollment requests the selected domain GUID, OCID and URL; the scanner user OCID must
+come from that domain. **Tenancy home region** routes tenancy, organization, policy, Audit and cost
+operations. **Identity-domain region** routes domain metadata and regional identity operations and
+may differ. Leave it blank only to discover it via domain metadata (legacy records fall back to
+home-region routing for initial metadata lookup). Once verified, the discovered domain region is
+saved. A supplied region that disagrees with metadata fails verification.
+
+OGC verifies the domain's OCID, URL, active state and owning tenancy, including domains hosted in
+an accessible tenancy compartment. It queries the selected domain's Users API by the configured
+parent user OCID and checks username `ogc`, active status, `domainOcid` and `tenancyOcid`; it no
+longer uses legacy IAM `GetUser` for scanner binding. Parent JWT and human-login endpoints use the
+selected domain. Child Configure still asks only for URL and client credentials, discovers that
+domain across tenancy compartments, and looks up the active service user named `ogc`.
+
+With “Scanner domain only”, collection reads the configured domain, not an additional Default
+domain. “All identity domains” reads all enabled active domains using each domain's own metadata
+region; the scanner still requires tenancy-level read grants. Tenancy home region remains separate.
+
+New Terraform bundles keep the internal data-source address `oci_identity_domain.default` for
+compatibility, but it now represents the domain selected by OCID and has no Default-name/type
+restriction. Policies use `Allow group id <scanner-group-OCID> ...`, so no Default-domain group is
+assumed. Parent public-key registration uses `oci_identity_domains_api_key` scoped to the selected
+domain and SCIM user ID. Only the public key enters Terraform.
+
+**Existing Terraform state:** parent key registration previously used
+`oci_identity_api_key.scanner`; the new address is `oci_identity_domains_api_key.scanner`. These
+are different resource types. Back up state and review the plan/import procedure before reusing
+an existing stack. Do not apply a plan that deletes/recreates a working scanner key or duplicates
+existing user/group/app resources. Runtime credentials do not require reprovisioning merely to
+retry verification with the updated application. Region and non-default-domain acceptance still
+require testing against the target tenancy; schema validation alone is not live certification.

@@ -2,7 +2,7 @@
 
 The Scan tab covers the enrolled parent organization. A full scan discovers children and
 collects what each tenancy's collection settings enable (by default IAM inventory from the
-default identity domain, policies, governance datasets and Audit activity) from the parent and
+selected scanner identity domain, policies, governance datasets and Audit activity) from the parent and
 configured, unpaused children. Unconfigured and departed children are
 excluded. Existing dataset permissions, partial coverage and read-only OCI boundaries apply.
 
@@ -69,21 +69,21 @@ replacement clears all settings.
 | Cloud Guard | on | `cloud_guard.*`, `security_zones.zones` |
 | Cloud Advisor | on | `optimizer.*` |
 | Identities | on | `identity_domains.users/groups/dynamic_groups/api_keys` |
-| Identity domains | **default domain only** | which domains identities are read from; "All identity domains" reads every active domain |
+| Identity domains | **selected scanner domain only** | which domains identities are read from; "All identity domains" reads every active domain |
 | Policies | on | `identity.policies` |
 | Audit | on | `audit.*` and the activity analysis |
 | Cost (parent row only) | on | `cost.monthly`: organization cost from the parent's Usage API; needs `read usage-report` in the parent |
 
 Compartments, subscribed regions and the identity-domain list are always collected because
-scoping, Audit and default-domain detection depend on them. The default domain is the domain
-verified at enrollment or Configure (`type == DEFAULT` as a fallback).
+scoping, Audit and selected-domain detection depend on them. The scanner domain is the domain
+verified at enrollment or Configure (matching the configured domain OCID).
 
 A disabled dataset is not read and publishes no coverage scope, so it is never an
 `OGC-ACCESS-002` gap and never makes a child Partial. Data and findings already stored for it are
 kept and not re-evaluated; tabs name the tenancies whose collection is disabled. Analysis scopes
 follow the settings: `analysis.policy` needs Policies; `analysis.identity`, `analysis.api_keys`
 and `analysis.activity` need Identities (activity also needs Audit). Policy analysis without
-identities, or with only the default domain read, treats subjects in unread domains as unknown:
+identities, or with only the selected scanner domain read, treats subjects in unread domains as unknown:
 they are never reported stale or unused, and the Identity → Policies view lists them as "Not
 analyzed". The scanner's read grants are unchanged and remain tenancy-level, so enabling all
 domains needs no new setup.
